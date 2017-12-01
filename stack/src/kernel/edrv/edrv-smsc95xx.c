@@ -10,7 +10,7 @@ smsc95xx available on the Raspberry Pi B.
 It's based on following drivers:
 * U-Boot smsc95xx driver
 * XinuOS SMSC9512 annotated register definitions, itself based on the
-* Linux drivers/net/usb/smsc95xx.h
+* Linux SMSC95xx driver
 
 
 \ingroup module_edrv
@@ -102,8 +102,12 @@ GNU General Public License for more details.
 // includes
 //------------------------------------------------------------------------------
 #include <common/oplkinc.h>
+#include <common/bufalloc.h>
 #include <kernel/edrv.h>
 #include <linux/usb.h>
+#include <linux/of_net.h>
+#include <linux/etherdevice.h>
+#include <linux/hrtimer.h>
 
 //============================================================================//
 //            G L O B A L   D E F I N I T I O N S                             //
@@ -130,13 +134,53 @@ GNU General Public License for more details.
 //============================================================================//
 
 //------------------------------------------------------------------------------
-// const defines
+// const defines {
 //------------------------------------------------------------------------------
+#define DRV_NAME                    "plk"
+
+#ifndef EDRV_MAX_TX_BUFFERS
+#define EDRV_MAX_TX_BUFFERS         256
+#endif
+
+#ifndef EDRV_MAX_TX_DESCS
+#define EDRV_MAX_TX_DESCS           16
+#define EDRV_TX_DESC_MASK           (EDRV_MAX_TX_DESCS - 1)
+#endif
+
+#ifndef EDRV_MAX_RX_BUFFERS
+#define EDRV_MAX_RX_BUFFERS         256
+#endif
+
+#ifndef EDRV_MAX_RX_DESCS
+#define EDRV_MAX_RX_DESCS           16
+#define EDRV_RX_DESC_MASK           (EDRV_MAX_RX_DESCS - 1)
+#endif
+
+#define EDRV_MAX_FRAME_SIZE         2048
+
+#define USB_CTRL_SET_TIMEOUT 5000
+#define USB_CTRL_GET_TIMEOUT 5000
+#define USB_BULK_SEND_TIMEOUT 5000
+#define USB_BULK_RECV_TIMEOUT 5000
+#define PHY_CONNECT_TIMEOUT 5000
+
+
+#define HS_USB_PKT_SIZE            512
+#define FS_USB_PKT_SIZE            64
+#define DEFAULT_HS_BURST_CAP_SIZE    (16 * 1024 + 5 * HS_USB_PKT_SIZE)
+#define DEFAULT_FS_BURST_CAP_SIZE    (6 * 1024 + 33 * FS_USB_PKT_SIZE)
+#define DEFAULT_BULK_IN_DELAY        0x00002000
+#define AX_RX_URB_SIZE 2048
+
+
+
 /** idVendor in the USB device descriptor for this device */
 #define SMSC9512_VENDOR_ID  0x0424
 
 /** idProduct in the USB device descriptor for this device */
 #define SMSC9512_PRODUCT_ID 0xEC00
+
+#define SMSC95XX_INTERNAL_PHY_ID 1
 
 /** TODO */
 #define SMSC9512_TX_OVERHEAD 8
@@ -351,6 +395,11 @@ GNU General Public License for more details.
 #define LED_GPIO_CFG_LNK_LED           0x00100000
 #define LED_GPIO_CFG_FDX_LED           0x00010000
 
+/* USB Vendor Requests */
+#define USB_VENDOR_REQUEST_WRITE_REGISTER    0xA0
+#define USB_VENDOR_REQUEST_READ_REGISTER    0xA1
+#define USB_VENDOR_REQUEST_GET_STATS        0xA2
+
 /****************************************************************************/
 
 /** Offset of General Purpose I/O Configuration Register.  */
@@ -391,6 +440,7 @@ GNU General Public License for more details.
 #define E2P_CMD_ADDR                   0x000001FF
 
 #define MAX_EEPROM_SIZE                512
+#define EEPROM_MAC_OFFSET               (0x01)
 
 /****************************************************************************/
 
@@ -693,7 +743,7 @@ GNU General Public License for more details.
 #define INT_ENP_TDFO                   (1 << 12)
 #define INT_ENP_RXDF                   (1 << 11)
 
-/***********************************/
+/***************** } ******************/
 
 #define USE_TX_CSUM 1
 #define USE_RX_CSUM 2
@@ -704,52 +754,140 @@ GNU General Public License for more details.
 typedef struct
 {
     tEdrvInitParam      initParam;                       ///< Init parameters
-    struct usb_device*  pusb_dev;                        ///< Pointer to the USB device structure
-    int                 phy_id;                          ///< PHY ID
+    struct usb_device*  pUsbDev;                         ///< Pointer to the USB device structure
+    int                 ep_in, ep_out, ep_int;           ///< USB endpoints
+       size_t              rx_urb_size;                     ///< Maximum USB URB size
+    UINT32              mac_cr;
+    struct tasklet_hrtimer poll_timer;
+    UINT8                irqinterval;                     ///< IRQ Pipe Intervall
+    int                 phyId;                           ///< PHY ID
     UINT8*              pRxBuf;                          ///< Pointer to the RX buffer
-    dma_addr_t          pRxBufDma;                       ///< Pointer to the DMA of the RX buffer
     UINT8*              pTxBuf;                          ///< Pointer to the TX buffer
-    dma_addr_t          pTxBufDma;                       ///< Pointer to the DMA of the TX buffer
     BOOL                afTxBufUsed[EDRV_MAX_TX_BUFFERS];///< Array describing whether a TX buffer is used
     tEdrvTxBuffer*      apTxBuffer[EDRV_MAX_TX_DESCS];   ///< Array of TX buffers
     spinlock_t          txSpinlock;                      ///< Spinlock to protect critical sections
-    UINT                headTxDesc;                      ///< Index of the head of the TX descriptor buffer
-    UINT                tailTxDesc;                      ///< Index of the tail of the TX descriptor buffer
 } tEdrvInstance;
-
-//------------------------------------------------------------------------------
-// local vars
-//------------------------------------------------------------------------------
-static tEdrvInstance edrvInstance_l;
 
 //------------------------------------------------------------------------------
 // local function prototypes
 //------------------------------------------------------------------------------
-static int smsc9512_reg_write(u32 index, u32 data);
-static int smsc9512_reg_read(u32 index, u32 *data);
-usb_status_t smsc9512_set_reg_bits(tEdrvInstance *udev, uint32_t index, uint32_t set);
+static int initOneUsbDev(struct usb_interface *pUsbInterface_p, const struct usb_device_id *pUsbDeviceId_p);
+static void removeOneUsbDev(struct usb_interface *);
+static int smsc95xx_write_reg(tEdrvInstance *dev, u32 index, u32 data);
+static int smsc95xx_read_reg(tEdrvInstance *dev, u32 index, u32 *data);
+static int smsc95xx_phy_wait_not_busy(tEdrvInstance *dev);
+static int smsc95xx_mdio_read(tEdrvInstance *dev, int phy_id, int idx);
+static void smsc95xx_mdio_write(tEdrvInstance *dev, int phy_id, int idx, int regval);
+static int smsc95xx_eeprom_confirm_not_busy(tEdrvInstance *dev);
+static int smsc95xx_wait_eeprom(tEdrvInstance *dev);
+static int smsc95xx_read_eeprom(tEdrvInstance *dev, u32 offset, u32 length, u8 *data);
+static int smsc95xx_mii_nway_restart(tEdrvInstance *dev);
+static int smsc95xx_phy_initialize(tEdrvInstance *dev);
+static void smsc95xx_init_mac_address(tEdrvInstance *inst);
+static int smsc95xx_write_hwaddr(tEdrvInstance *inst);
+static int smsc95xx_set_csums(tEdrvInstance *dev, int csums);
+static void smsc95xx_set_multicast(tEdrvInstance *dev);
+static void smsc95xx_start_tx_path(tEdrvInstance *dev);
+static void smsc95xx_start_rx_path(tEdrvInstance *dev);
+static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer);
 
-usb_status_t smsc9512_wait_device_attached(ushort minor);
+//------------------------------------------------------------------------------
+// local vars
+//------------------------------------------------------------------------------
+static bool turbo_mode = true;
+module_param(turbo_mode, bool, 0644);
+MODULE_PARM_DESC(turbo_mode, "Enable multiple frames per Rx transaction");
 
-usb_status_t smsc9512_set_mac_address(tEdrvInstance *udev, const uint8_t *macaddr);
-usb_status_t smsc9512_get_mac_address(tEdrvInstance *udev, uint8_t *macaddr);
+static tEdrvInstance edrvInstance_l;
+static tBufAlloc *pBufAlloc_l;
 
-struct usb_xfer_request;
+static const struct usb_device_id aEdrvUsbTbl_l[] = {
+    {
+        /* SMSC9500 USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9500),
+    },
+    {
+        /* SMSC9505 USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9505),
+    },
+    {
+        /* SMSC9500A USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9E00),
+    },
+    {
+        /* SMSC9505A USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9E01),
+    },
+    {
+        /* SMSC9512/9514 USB Hub & Ethernet Device */
+        USB_DEVICE(0x0424, 0xec00),
+    },
+    {
+        /* SMSC9500 USB Ethernet Device (SAL10) */
+        USB_DEVICE(0x0424, 0x9900),
+    },
+    {
+        /* SMSC9505 USB Ethernet Device (SAL10) */
+        USB_DEVICE(0x0424, 0x9901),
+    },
+    {
+        /* SMSC9500A USB Ethernet Device (SAL10) */
+        USB_DEVICE(0x0424, 0x9902),
+    },
+    {
+        /* SMSC9505A USB Ethernet Device (SAL10) */
+        USB_DEVICE(0x0424, 0x9903),
+    },
+    {
+        /* SMSC9512/9514 USB Hub & Ethernet Device (SAL10) */
+        USB_DEVICE(0x0424, 0x9904),
+    },
+    {
+        /* SMSC9500A USB Ethernet Device (HAL) */
+        USB_DEVICE(0x0424, 0x9905),
+    },
+    {
+        /* SMSC9505A USB Ethernet Device (HAL) */
+        USB_DEVICE(0x0424, 0x9906),
+    },
+    {
+        /* SMSC9500 USB Ethernet Device (Alternate ID) */
+        USB_DEVICE(0x0424, 0x9907),
+    },
+    {
+        /* SMSC9500A USB Ethernet Device (Alternate ID) */
+        USB_DEVICE(0x0424, 0x9908),
+    },
+    {
+        /* SMSC9512/9514 USB Hub & Ethernet Device (Alternate ID) */
+        USB_DEVICE(0x0424, 0x9909),
+    },
+    {
+        /* SMSC LAN9530 USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9530),
+    },
+    {
+        /* SMSC LAN9730 USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9730),
+    },
+    {
+        /* SMSC LAN89530 USB Ethernet Device */
+        USB_DEVICE(0x0424, 0x9E08),
+    },
+    { },        /* END */
+};
+MODULE_DEVICE_TABLE(usb, aEdrvUsbTbl_l);
 
-void smsc9512_rx_complete(struct usb_xfer_request *req);
-void smsc9512_tx_complete(struct usb_xfer_request *req);
+/* XXX can I use usbnet functions here? (usbnet_probe, usbnet_disconnect) */
+static struct usb_driver edrvDriver_l = {
+    .name                      = DRV_NAME,
+    .id_table                  = aEdrvUsbTbl_l,
+    .probe                     = initOneUsbDev,
+    .disconnect                = removeOneUsbDev,
+    .disable_hub_initiated_lpm = 1,
+};
 
-
-static inline void
-__smsc9512_dump_reg(tEdrvInstance *udev, uint32_t index, const char *name)
-{
-    uint32_t val = 0;
-    smsc9512_read_reg(udev, index, &val);
-    kprintf("SMSC9512: %s = 0x%08x\n", name, val);
-}
-
-#define smsc9512_dump_reg(udev, index) __smsc9512_dump_reg(udev, index, #index)
-
+module_usb_driver(edrvDriver_l);
 
 //============================================================================//
 //            P U B L I C   F U N C T I O N S                                 //
@@ -770,24 +908,328 @@ This function initializes the Ethernet driver.
 //------------------------------------------------------------------------------
 tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 {
+    int i;
+    tBufData    bufData;
     ASSERT(pEdrvInitParam_p != NULL);
 
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof edrvInstance_l);
 
-    struct eth_device *eth; /* FIXME */
-    bd_t *bd; /* FIXME */
+    edrvInstance_l.initParam = *pEdrvInitParam_p;
 
+    OPLK_MEMSET(&edrvDriver_l, 0, sizeof(edrvDriver_l));
+    edrvDriver_l.name         = DRV_NAME;
+    edrvDriver_l.id_table     = aEdrvUsbTbl_l;
+    edrvDriver_l.probe        = initOneUsbDev;
+    edrvDriver_l.disconnect   = removeOneUsbDev;
+
+    if (usb_register(&edrvDriver_l)) {
+        printk("smsc95xx: unable to register usb driver\n");
+        return kErrorNoResource;
+    }
+
+    // init and fill buffer allocation instance
+    if ((pBufAlloc_l = bufalloc_init(EDRV_MAX_TX_BUFFERS)) == NULL)
+        return kErrorNoResource;
+
+    for (i = 0; i < EDRV_MAX_TX_BUFFERS; i++)
+    {
+        bufData.bufferNumber = i;
+        bufData.pBuffer = edrvInstance_l.pTxBuf + (i * EDRV_MAX_FRAME_SIZE);
+
+        bufalloc_addBuffer(pBufAlloc_l, &bufData);
+    }
+
+    // local MAC address might have been changed in initOneUsbDev
+    printk("%s local MAC = %pM\n", edrvInstance_l.initParam.aMacAddr[i]);
+
+    // FIXME figure out how to use USB interrupts
+    tasklet_hrtimer_init(&edrvInstance_l.poll_timer, smsc95xx_recv, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+
+    return kErrorOk;
+}
+
+//------------------------------------------------------------------------------
+/**
+  \brief  Shut down Ethernet driver
+
+This function shuts down the Ethernet driver.
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_exit(void)
+{
+    if (edrvDriver_l.name != NULL)
+    {
+        printk("%s calling usb_unregister_driver()\n", __func__);
+        usb_deregister(&edrvDriver_l);
+        bufalloc_exit(pBufAlloc_l);
+        pBufAlloc_l = NULL;
+        // clear driver structure
+        OPLK_MEMSET(&edrvDriver_l, 0, sizeof(edrvDriver_l));
+    }
+    else
+    {
+        printk("%s USB driver for openPOWERLINK already unregistered\n", __func__);
+    }
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Get MAC address
+
+This function returns the MAC address of the Ethernet controller
+
+\return The function returns a pointer to the MAC address.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+const UINT8* edrv_getMacAddr(void)
+{
+    return edrvInstance_l.initParam.aMacAddr;
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Send Tx buffer
+
+This function sends the Tx buffer.
+
+\param[in,out]  pBuffer_p           Tx buffer descriptor
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
+{
+    u8 *packet = pBuffer_p->pBuffer;
+    u32 length = pBuffer_p->txFrameSize;
+    int err = -E2BIG;
+    int actual_len;
+    u32 tx_cmd[2]; /* A & B */
+
+    printk("** %s(), len %d", __func__, length);
+    if (length > 1536)
+        goto Exit;
+
+    tx_cmd[0] = length | TX_CMD_A_FIRST_SEG | TX_CMD_A_LAST_SEG;
+    tx_cmd[1] = length;
+    cpu_to_le32s(&tx_cmd[0]);
+    cpu_to_le32s(&tx_cmd[1]);
+
+    /* prepend cmd_a and cmd_b */
+    packet -= sizeof tx_cmd;
+    memcpy(packet, tx_cmd, sizeof tx_cmd);
+    length += sizeof tx_cmd;
+
+    err = usb_bulk_msg(edrvInstance_l.pUsbDev, edrvInstance_l.ep_out, packet,
+                length, &actual_len,
+                USB_BULK_SEND_TIMEOUT);
+    printk("Tx: len = %u, actual = %u, err = %d\n", length, actual_len, err);
+
+Exit:
+    if (pBuffer_p->pfnTxHandler != NULL)
+    {
+        pBuffer_p->pfnTxHandler(pBuffer_p);
+    }
+    return err ? kErrorGeneralError : kErrorOk;
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Allocate Tx buffer
+
+This function allocates a Tx buffer.
+
+\param[in,out]  pBuffer_p           Tx buffer descriptor
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
+{
+    tBufData    bufData;
+
+    // Check parameter validity
+    ASSERT(pBuffer_p != NULL);
+
+    if (pBuffer_p->maxBufferSize > EDRV_MAX_FRAME_SIZE)
+        return kErrorEdrvNoFreeBufEntry;
+
+    if (edrvInstance_l.pTxBuf == NULL)
+    {
+        printk("%s Tx buffers currently not allocated\n", __FUNCTION__);
+        return kErrorEdrvNoFreeBufEntry;
+    }
+
+    // get a free Tx buffer from the allocation instance
+    if (bufalloc_getBuffer(pBufAlloc_l, &bufData) != kErrorOk)
+        return kErrorEdrvNoFreeBufEntry;
+
+    pBuffer_p->pBuffer = bufData.pBuffer + 16;
+    pBuffer_p->txBufferNumber.value = bufData.bufferNumber;
+    pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE - 16;
+    edrvInstance_l.afTxBufUsed[bufData.bufferNumber] = TRUE;
+
+    return kErrorOk;
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Free Tx buffer
+
+This function releases the Tx buffer.
+
+\param[in,out]  pBuffer_p           Tx buffer descriptor
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
+{
+    tBufData    bufData;
+
+    // Check parameter validity
+    ASSERT(pBuffer_p != NULL);
+
+    bufData.pBuffer = pBuffer_p->pBuffer - 16;
+    bufData.bufferNumber = pBuffer_p->txBufferNumber.value;
+
+    edrvInstance_l.afTxBufUsed[pBuffer_p->txBufferNumber.value] = FALSE;
+    return bufalloc_releaseBuffer(pBufAlloc_l, &bufData);
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Change Rx filter setup
+
+This function changes the Rx filter setup. The parameter entryChanged_p
+selects the Rx filter entry that shall be changed and \p changeFlags_p determines
+the property.
+If \p entryChanged_p is equal or larger count_p all Rx filters shall be changed.
+
+\param[in,out]  pFilter_p           Base pointer of Rx filter array
+\param[in]      count_p             Number of Rx filter array entries
+\param[in]      entryChanged_p      Index of Rx filter entry that shall be changed
+\param[in]      changeFlags_p       Bit mask that selects the changing Rx filter property
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_changeRxFilter(tEdrvFilter* pFilter_p,
+                               UINT count_p,
+                               UINT entryChanged_p,
+                               UINT changeFlags_p)
+{
+    return kErrorOk; /* FIXME how to configure Rx Filters? */
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Clear multicast address entry
+
+This function removes the multicast entry from the Ethernet controller.
+
+\param[in]      pMacAddr_p          Multicast address
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_clearRxMulticastMacAddr(const UINT8* pMacAddr_p)
+{
+    return kErrorOk;
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Set multicast address entry
+
+This function sets a multicast entry into the Ethernet controller.
+
+\param[in]      pMacAddr_p          Multicast address
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_setRxMulticastMacAddr(const UINT8* pMacAddr_p)
+{
+    return kErrorOk;
+}
+
+//============================================================================//
+//            P R I V A T E   F U N C T I O N S                               //
+//============================================================================//
+/// \name Private Functions
+/// \{
+
+static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb_device_id *pUsbDeviceId_p)
+{
+    unsigned  tmp;
     int ret;
     u32 write_buf;
     u32 read_buf;
     u32 burst_cap;
     int timeout;
-    struct ueth_data *dev = (struct ueth_data *)eth->priv;
+    tEdrvInstance *dev = &edrvInstance_l;
 #define TIMEOUT_RESOLUTION 50    /* ms */
     int link_detected;
+    struct usb_host_endpoint *in = NULL, *out = NULL, *intr = NULL;
 
+    dev->pUsbDev = interface_to_usbdev(pUsbInterface_p);
     printk("** %s()\n", __func__);
-    dev->phy_id = SMSC95XX_INTERNAL_PHY_ID; /* fixed phy id */
+
+    for (tmp = 0; tmp < pUsbInterface_p->num_altsetting; tmp++) {
+        struct usb_host_interface *alt = &pUsbInterface_p->altsetting[tmp];
+        /*
+         * We are expecting a minimum of 3 endpoints - in, out (bulk), and int.
+         * We will ignore any others.
+         */
+        unsigned i;
+        for (i = 0; i < alt->desc.bNumEndpoints; i++) {
+            struct usb_host_endpoint *ep = &alt->endpoint[i];
+            /* is it an BULK endpoint? */
+            if ((ep->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK) {
+                if (ep->desc.bEndpointAddress & USB_DIR_IN)
+                    in = ep;
+                else
+                    out = ep;
+            }
+
+            /* is it an interrupt endpoint? */
+            if ((ep->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT) {
+                intr = ep;
+            }
+        }
+        printk("Endpoints In %d Out %d Int %d\n", dev->ep_in, dev->ep_out, dev->ep_int);
+    }
+
+    /* Do some basic sanity checks, and bail if we find a problem */
+    if (!in || !out || !intr) {
+        printk("Problems with device: Endpoint is 0\n");
+        return -EIO;
+    }
+
+    dev->ep_in  = usb_rcvbulkpipe(dev->pUsbDev, in->desc.bEndpointAddress  & USB_ENDPOINT_NUMBER_MASK);
+    dev->ep_out = usb_sndbulkpipe(dev->pUsbDev, out->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK);
+    dev->ep_int = usb_rcvintpipe(dev->pUsbDev, intr->desc.bEndpointAddress & USB_ENDPOINT_NUMBER_MASK); // FIXME unused and untested
+    dev->irqinterval = intr->desc.bInterval;
+
+    dev->phyId = SMSC95XX_INTERNAL_PHY_ID; /* fixed phy id */
 
     write_buf = HW_CFG_LRST;
     ret = smsc95xx_write_reg(dev, HW_CFG, write_buf);
@@ -805,7 +1247,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
     if (timeout >= 100) {
         printk("timeout waiting for completion of Lite Reset\n");
-        return -1;
+        return -EBUSY;
     }
 
     write_buf = PM_CTL_PHY_RST;
@@ -823,16 +1265,14 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     } while ((read_buf & PM_CTL_PHY_RST) && (timeout < 100));
     if (timeout >= 100) {
         printk("timeout waiting for PHY Reset\n");
-        return -1;
+        return -EBUSY;
     }
-    if (!dev->have_hwaddr && smsc95xx_init_mac_address(eth, dev) == 0)
-        dev->have_hwaddr = 1;
-    if (!dev->have_hwaddr) {
-        puts("Error: SMSC95xx: No MAC address set - set usbethaddr\n");
-        return -1;
+    if (!is_zero_ether_addr(dev->initParam.aMacAddr)) {
+        if ((ret = smsc95xx_write_hwaddr(dev)))
+            return ret;
+    } else {
+        smsc95xx_init_mac_address(dev);
     }
-    if (smsc95xx_write_hwaddr(eth) < 0)
-        return -1;
 
     ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
     if (ret < 0)
@@ -850,18 +1290,18 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     printk("Read Value from HW_CFG after writing "
             "HW_CFG_BIR: 0x%08x\n", read_buf);
 
-#ifdef TURBO_MODE
-    if (dev->pusb_dev->speed == USB_SPEED_HIGH) {
-        burst_cap = DEFAULT_HS_BURST_CAP_SIZE / HS_USB_PKT_SIZE;
-        dev->rx_urb_size = DEFAULT_HS_BURST_CAP_SIZE;
+    if (turbo_mode) {
+        if (dev->pUsbDev->speed == USB_SPEED_HIGH) {
+            burst_cap = DEFAULT_HS_BURST_CAP_SIZE / HS_USB_PKT_SIZE;
+            dev->rx_urb_size = DEFAULT_HS_BURST_CAP_SIZE;
+        } else {
+            burst_cap = DEFAULT_FS_BURST_CAP_SIZE / FS_USB_PKT_SIZE;
+            dev->rx_urb_size = DEFAULT_FS_BURST_CAP_SIZE;
+        }
     } else {
-        burst_cap = DEFAULT_FS_BURST_CAP_SIZE / FS_USB_PKT_SIZE;
-        dev->rx_urb_size = DEFAULT_FS_BURST_CAP_SIZE;
+        burst_cap = 0;
+        dev->rx_urb_size = EDRV_MAX_FRAME_SIZE;
     }
-#else
-    burst_cap = 0;
-    dev->rx_urb_size = MAX_SINGLE_PACKET_SIZE;
-#endif
     printk("rx_urb_size=%ld\n", (ulong)dev->rx_urb_size);
 
     ret = smsc95xx_write_reg(dev, BURST_CAP, burst_cap);
@@ -889,11 +1329,12 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         return ret;
     printk("Read Value from HW_CFG: 0x%08x\n", read_buf);
 
-#ifdef TURBO_MODE
-    read_buf |= (HW_CFG_MEF | HW_CFG_BCE);
-#endif
+    if (turbo_mode)
+        read_buf |= (HW_CFG_MEF | HW_CFG_BCE);
+
     read_buf &= ~HW_CFG_RXDOFF;
 
+#undef NET_IP_ALIGN // TODO hmm?
 #define NET_IP_ALIGN 0
     read_buf |= NET_IP_ALIGN << 9;
 
@@ -938,7 +1379,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         return ret;
 
     /* Disable checksum offload engines */
-    ret = smsc95xx_set_csums(dev, 0, 0);
+    ret = smsc95xx_set_csums(dev, USE_TX_CSUM | USE_RX_CSUM);
     if (ret < 0) {
         printk("Failed to set csum offload: %d\n", ret);
         return ret;
@@ -946,7 +1387,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     smsc95xx_set_multicast(dev);
 
     if (smsc95xx_phy_initialize(dev) < 0)
-        return -1;
+        return -EIO;
     ret = smsc95xx_read_reg(dev, INT_EP_CTL, &read_buf);
     if (ret < 0)
         return ret;
@@ -963,180 +1404,36 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
     timeout = 0;
     do {
-        link_detected = smsc95xx_mdio_read(dev, dev->phy_id, MII_BMSR)
+        link_detected = smsc95xx_mdio_read(dev, dev->phyId, MII_BMSR)
             & BMSR_LSTATUS;
         if (!link_detected) {
             if (timeout == 0)
-                printf("Waiting for Ethernet connection... ");
+                printk("Waiting for Ethernet connection... ");
             udelay(TIMEOUT_RESOLUTION * 1000);
             timeout += TIMEOUT_RESOLUTION;
         }
     } while (!link_detected && timeout < PHY_CONNECT_TIMEOUT);
     if (link_detected) {
         if (timeout != 0)
-            printf("done.\n");
+            printk("done.\n");
     } else {
-        printf("unable to connect.\n");
-        return -1;
+        printk("unable to connect.\n");
+        return -EBUSY;
     }
+
+    tasklet_hrtimer_start(&dev->poll_timer, ktime_set(0, 1000*1000), HRTIMER_MODE_REL);
     return 0;
 }
-}
 
-//------------------------------------------------------------------------------
-/**
-  \brief  Shut down Ethernet driver
-
-This function shuts down the Ethernet driver.
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_exit(void)
+static void removeOneUsbDev(struct usb_interface *pUsbInterface_p)
 {
-    return sim_exitEdrv();
+    if (edrvInstance_l.pUsbDev != interface_to_usbdev(pUsbInterface_p))
+        return;
+
+    /* That's it? */
+    tasklet_hrtimer_cancel(&edrvInstance_l.poll_timer);
+    edrvInstance_l.pUsbDev = NULL;
 }
-
-//------------------------------------------------------------------------------
-/**
-\brief  Get MAC address
-
-This function returns the MAC address of the Ethernet controller
-
-\return The function returns a pointer to the MAC address.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-const UINT8* edrv_getMacAddr(void)
-{
-    return sim_getMacAddr();
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Send Tx buffer
-
-This function sends the Tx buffer.
-
-\param[in,out]  pBuffer_p           Tx buffer descriptor
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
-{
-    return sim_sendTxBuffer(pBuffer_p);
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Allocate Tx buffer
-
-This function allocates a Tx buffer.
-
-\param[in,out]  pBuffer_p           Tx buffer descriptor
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
-{
-    return sim_allocTxBuffer(pBuffer_p);
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Free Tx buffer
-
-This function releases the Tx buffer.
-
-\param[in,out]  pBuffer_p           Tx buffer descriptor
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
-{
-    return sim_freeTxBuffer(pBuffer_p);
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Change Rx filter setup
-
-This function changes the Rx filter setup. The parameter entryChanged_p
-selects the Rx filter entry that shall be changed and \p changeFlags_p determines
-the property.
-If \p entryChanged_p is equal or larger count_p all Rx filters shall be changed.
-
-\param[in,out]  pFilter_p           Base pointer of Rx filter array
-\param[in]      count_p             Number of Rx filter array entries
-\param[in]      entryChanged_p      Index of Rx filter entry that shall be changed
-\param[in]      changeFlags_p       Bit mask that selects the changing Rx filter property
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_changeRxFilter(tEdrvFilter* pFilter_p,
-                               UINT count_p,
-                               UINT entryChanged_p,
-                               UINT changeFlags_p)
-{
-    return sim_changeRxFilter(pFilter_p, count_p, entryChanged_p, changeFlags_p);
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Clear multicast address entry
-
-This function removes the multicast entry from the Ethernet controller.
-
-\param[in]      pMacAddr_p          Multicast address
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_clearRxMulticastMacAddr(const UINT8* pMacAddr_p)
-{
-    return sim_clearRxMulticastMacAddr(pMacAddr_p);
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Set multicast address entry
-
-This function sets a multicast entry into the Ethernet controller.
-
-\param[in]      pMacAddr_p          Multicast address
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_setRxMulticastMacAddr(const UINT8* pMacAddr_p)
-{
-    return sim_setRxMulticastMacAddr(pMacAddr_p);
-}
-
-//============================================================================//
-//            P R I V A T E   F U N C T I O N S                               //
-//============================================================================//
-/// \name Private Functions
-/// \{
 /*
  * Smsc95xx infrastructure commands
  */
@@ -1146,14 +1443,14 @@ static int smsc95xx_write_reg(tEdrvInstance *dev, u32 index, u32 data)
 
     cpu_to_le32s(&data);
 
-    len = usb_control_msg(dev->pusbdev, usb_sndctrlpipe(dev->pusb_dev, 0),
+    len = usb_control_msg(dev->pUsbDev, usb_sndctrlpipe(dev->pUsbDev, 0),
         USB_VENDOR_REQUEST_WRITE_REGISTER,
         USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
-        00, index, &data, sizeof(data), USB_CTRL_SET_TIMEOUT);
+        00, index, &data, sizeof(data), USB_CTRL_SET_TIMEOUT
+    );
     if (len != sizeof(data)) {
-        printk("smsc95xx_write_reg failed: index=%d, data=%d, len=%d",
-              index, data, len);
-        return -1;
+        printk("smsc95xx_write_reg failed: index=%d, data=%d, len=%d", index, data, len);
+        return -EIO;
     }
     return 0;
 }
@@ -1162,14 +1459,13 @@ static int smsc95xx_read_reg(tEdrvInstance *dev, u32 index, u32 *data)
 {
     int len;
 
-    len = usb_control_msg(dev->pusbdev, usb_rcvctrlpipe(dev->pusbdev, 0),
+    len = usb_control_msg(dev->pUsbDev, usb_rcvctrlpipe(dev->pUsbDev, 0),
         USB_VENDOR_REQUEST_READ_REGISTER,
         USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
         00, index, data, sizeof(data), USB_CTRL_GET_TIMEOUT);
     if (len != sizeof(data)) {
-        printk("smsc95xx_read_reg failed: index=%d, len=%d",
-              index, len);
-        return -1;
+        printk("smsc95xx_read_reg failed: index=%d, len=%d", index, len);
+        return -EIO;
     }
 
     le32_to_cpus(data);
@@ -1179,16 +1475,22 @@ static int smsc95xx_read_reg(tEdrvInstance *dev, u32 index, u32 *data)
 /* Loop until the read is completed with timeout */
 static int smsc95xx_phy_wait_not_busy(tEdrvInstance *dev)
 {
-    unsigned long start_time = get_timer(0);
+    unsigned long start_time = jiffies;
     u32 val;
+    int ret;
 
     do {
-        smsc95xx_read_reg(dev, MII_ADDR, &val);
+        ret = smsc95xx_read_reg(dev, MII_ADDR, &val);
+        if (ret < 0) {
+            printk("Error reading MII_ACCESS\n");
+            return ret;
+        }
+
         if (!(val & MII_BUSY))
             return 0;
-    } while (get_timer(start_time) < 1 * 1000 * 1000);
+    } while (!time_after(jiffies, start_time + HZ));
 
-    return -1;
+    return -EIO;
 }
 
 static int smsc95xx_mdio_read(tEdrvInstance *dev, int phy_id, int idx)
@@ -1198,7 +1500,7 @@ static int smsc95xx_mdio_read(tEdrvInstance *dev, int phy_id, int idx)
     /* confirm MII not busy */
     if (smsc95xx_phy_wait_not_busy(dev)) {
         printk("MII is busy in smsc95xx_mdio_read\n");
-        return -1;
+        return -EBUSY;
     }
 
     /* set the address, index & direction (read from PHY) */
@@ -1207,7 +1509,7 @@ static int smsc95xx_mdio_read(tEdrvInstance *dev, int phy_id, int idx)
 
     if (smsc95xx_phy_wait_not_busy(dev)) {
         printk("Timed out reading MII reg %02X\n", idx);
-        return -1;
+        return -EBUSY;
     }
 
     smsc95xx_read_reg(dev, MII_DATA, &val);
@@ -1235,44 +1537,55 @@ static void smsc95xx_mdio_write(tEdrvInstance *dev, int phy_id, int idx,
 
     if (smsc95xx_phy_wait_not_busy(dev))
         printk("Timed out writing MII reg %02X\n", idx);
+    // TODO error code?
 }
 
 static int smsc95xx_eeprom_confirm_not_busy(tEdrvInstance *dev)
 {
-    unsigned long start_time = get_timer(0);
+    unsigned long start_time = jiffies;
     u32 val;
+    int ret;
 
     do {
-        smsc95xx_read_reg(dev, E2P_CMD, &val);
-        if (!(val & E2P_CMD_LOADED)) {
-            printk("No EEPROM present\n");
-            return -1;
+        ret = smsc95xx_read_reg(dev, E2P_CMD, &val);
+        if (ret < 0) {
+            printk("Error reading E2P_CMD\n");
+            return ret;
         }
+
         if (!(val & E2P_CMD_BUSY))
             return 0;
+
         udelay(40);
-    } while (get_timer(start_time) < 1 * 1000 * 1000);
+    } while (!time_after(jiffies, start_time + HZ));
 
     printk("EEPROM is busy\n");
-    return -1;
+    return -EBUSY;
 }
 
 static int smsc95xx_wait_eeprom(tEdrvInstance *dev)
 {
-    unsigned long start_time = get_timer(0);
+    unsigned long start_time = jiffies;
     u32 val;
+    int ret;
 
     do {
-        smsc95xx_read_reg(dev, E2P_CMD, &val);
+        ret = smsc95xx_read_reg(dev, E2P_CMD, &val);
+        if (ret < 0) {
+            printk("Error reading E2P_CMD\n");
+            return ret;
+        }
+
         if (!(val & E2P_CMD_BUSY) || (val & E2P_CMD_TIMEOUT))
             break;
         udelay(40);
-    } while (get_timer(start_time) < 1 * 1000 * 1000);
+    } while (!time_after(jiffies, start_time + HZ));
 
     if (val & (E2P_CMD_TIMEOUT | E2P_CMD_BUSY)) {
         printk("EEPROM read operation timeout\n");
-        return -1;
+        return -EIO;
     }
+
     return 0;
 }
 
@@ -1302,83 +1615,89 @@ static int smsc95xx_read_eeprom(tEdrvInstance *dev, u32 offset, u32 length,
 }
 
 /*
- * mii_nway_restart - restart NWay (autonegotiation) for this interface
+ * smsc95xx_mii_nway_restart - restart NWay (autonegotiation) for this interface
  *
  * Returns 0 on success, negative on error.
+ * TODO maybe use mii_if_info and associated functions instead
  */
-static int mii_nway_restart(tEdrvInstance *dev, int phy_id)
+static int smsc95xx_mii_nway_restart(tEdrvInstance *dev)
 {
     int bmcr;
-    int r = -1;
+    int r = -EIO;
 
     /* if autoneg is off, it's an error */
-    bmcr = smsc95xx_mdio_read(dev, phy_id, MII_BMCR);
+    bmcr = smsc95xx_mdio_read(dev, dev->phyId, MII_BMCR);
 
     if (bmcr & BMCR_ANENABLE) {
         bmcr |= BMCR_ANRESTART;
-        smsc95xx_mdio_write(dev, phy_id, MII_BMCR, bmcr);
+        smsc95xx_mdio_write(dev, dev->phyId, MII_BMCR, bmcr);
         r = 0;
     }
     return r;
 }
 
-static int smsc95xx_phy_initialize(tEdrvInstance *dev, int phy_id)
+static int smsc95xx_phy_initialize(tEdrvInstance *dev)
 {
-    smsc95xx_mdio_write(dev, phy_id, MII_BMCR, BMCR_RESET);
-    smsc95xx_mdio_write(dev, phy_id, MII_ADVERTISE,
+    smsc95xx_mdio_write(dev, dev->phyId, MII_BMCR, BMCR_RESET);
+    smsc95xx_mdio_write(dev, dev->phyId, MII_ADVERTISE,
         ADVERTISE_ALL | ADVERTISE_CSMA | ADVERTISE_PAUSE_CAP |
         ADVERTISE_PAUSE_ASYM);
 
     /* read to clear */
-    smsc95xx_mdio_read(dev, phy_id, PHY_INT_SRC);
+    smsc95xx_mdio_read(dev, dev->phyId, PHY_INT_SRC);
 
-    smsc95xx_mdio_write(dev, phy_id, PHY_INT_MASK,
+    smsc95xx_mdio_write(dev, dev->phyId, PHY_INT_MASK,
         PHY_INT_MASK_DEFAULT);
-    mii_nway_restart(dev);
+    smsc95xx_mii_nway_restart(dev);
 
     printk("phy initialised succesfully\n");
     return 0;
 }
 
-static int smsc95xx_init_mac_address(struct eth_device *eth,
-        tEdrvInstance *dev)
+static void smsc95xx_init_mac_address(tEdrvInstance *inst)
 {
-    /* try reading mac address from EEPROM */
-    if (smsc95xx_read_eeprom(dev, EEPROM_MAC_OFFSET, ETH_ALEN,
-            eth->enetaddr) == 0) {
-        if (is_valid_ether_addr(eth->enetaddr)) {
+    const char *from;
+    const u8 *mac_of;
+    u8 *mac = inst->initParam.aMacAddr;
+
+    /* maybe the boot loader passed the MAC address in devicetree */
+    if ((mac_of = of_get_mac_address(inst->pUsbDev->dev.of_node))) {
+        from = "read from device tree";
+        memcpy(mac, mac_of, ETH_ALEN);
+    } else if (smsc95xx_read_eeprom(inst, EEPROM_MAC_OFFSET, ETH_ALEN, mac) == 0
+        && is_valid_ether_addr(mac)) {
             /* eeprom values are valid so use them */
-            printk("MAC address read from EEPROM\n");
-            return 0;
-        }
+            from = "read from EEPROM";
+    } else { /* No eeprom, or eeprom values are invalid. Generating a random MAC address */
+        eth_random_addr(mac);
     }
 
-    /*
-     * No eeprom, or eeprom values are invalid. Generating a random MAC
-     * address is not safe. Just return an error.
-     */
-    return -1;
+    printk("MAC address was %s: %pM\n", from, mac);
 }
 
-static int smsc95xx_write_hwaddr(struct eth_device *eth)
+static int smsc95xx_write_hwaddr(tEdrvInstance *inst)
 {
-    struct ueth_data *dev = (struct ueth_data *)eth->priv;
-    u32 addr_lo = __get_unaligned_le32(&eth->enetaddr[0]);
-    u32 addr_hi = __get_unaligned_le16(&eth->enetaddr[4]);
+    u32 temp = 0;
     int ret;
 
     /* set hardware address */
-    printk("** %s()\n", __func_);
-    ret = smsc95xx_write_reg(dev, ADDRL, addr_lo);
+    printk("** %s()\n", __func__);
+    temp |= inst->initParam.aMacAddr[0] <<  0;
+    temp |= inst->initParam.aMacAddr[1] <<  8;
+    temp |= inst->initParam.aMacAddr[2] << 16;
+    temp |= inst->initParam.aMacAddr[3] << 24;
+    ret = smsc95xx_write_reg(inst, ADDRL, temp);
     if (ret < 0)
         return ret;
 
-    ret = smsc95xx_write_reg(dev, ADDRH, addr_hi);
+    temp = 0;
+    temp |= inst->initParam.aMacAddr[4] <<  0;
+    temp |= inst->initParam.aMacAddr[5] <<  8;
+    ret = smsc95xx_write_reg(inst, ADDRH, temp);
     if (ret < 0)
         return ret;
 
-    printk("MAC %pM\n", eth->enetaddr);
-    dev->have_hwaddr = 1;
+    printk("MAC %pM\n", inst->initParam.aMacAddr);
     return 0;
 }
 
@@ -1408,14 +1727,14 @@ static int smsc95xx_set_csums(tEdrvInstance *dev, int csums)
     return 0;
 }
 
-static void smsc95xx_set_multicast(struct ueth_data *dev)
+static void smsc95xx_set_multicast(tEdrvInstance *dev)
 {
     /* No multicast in u-boot */
     dev->mac_cr &= ~(MAC_CR_PRMS | MAC_CR_MCPAS | MAC_CR_HPFILT);
 }
 
 /* starts the TX path */
-static void smsc95xx_start_tx_path(struct ueth_data *dev)
+static void smsc95xx_start_tx_path(tEdrvInstance *dev)
 {
     u32 reg_val;
 
@@ -1430,271 +1749,26 @@ static void smsc95xx_start_tx_path(struct ueth_data *dev)
 }
 
 /* Starts the Receive path */
-static void smsc95xx_start_rx_path(struct ueth_data *dev)
+static void smsc95xx_start_rx_path(tEdrvInstance *dev)
 {
     dev->mac_cr |= MAC_CR_RXEN;
     smsc95xx_write_reg(dev, MAC_CR, dev->mac_cr);
 }
 
-/*
- * Smsc95xx callbacks
- */
-static int smsc95xx_init(struct eth_device *eth, bd_t *bd)
+static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer)
 {
-    int ret;
-    u32 write_buf;
-    u32 read_buf;
-    u32 burst_cap;
-    int timeout;
-    struct ueth_data *dev = (struct ueth_data *)eth->priv;
-#define TIMEOUT_RESOLUTION 50    /* ms */
-    int link_detected;
-
-    printk("** %s()\n", __func__);
-    dev->phy_id = SMSC95XX_INTERNAL_PHY_ID; /* fixed phy id */
-
-    write_buf = HW_CFG_LRST;
-    ret = smsc95xx_write_reg(dev, HW_CFG, write_buf);
-    if (ret < 0)
-        return ret;
-
-    timeout = 0;
-    do {
-        ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
-        if (ret < 0)
-            return ret;
-        udelay(10 * 1000);
-        timeout++;
-    } while ((read_buf & HW_CFG_LRST) && (timeout < 100));
-
-    if (timeout >= 100) {
-        printk("timeout waiting for completion of Lite Reset\n");
-        return -1;
-    }
-
-    write_buf = PM_CTL_PHY_RST;
-    ret = smsc95xx_write_reg(dev, PM_CTRL, write_buf);
-    if (ret < 0)
-        return ret;
-
-    timeout = 0;
-    do {
-        ret = smsc95xx_read_reg(dev, PM_CTRL, &read_buf);
-        if (ret < 0)
-            return ret;
-        udelay(10 * 1000);
-        timeout++;
-    } while ((read_buf & PM_CTL_PHY_RST) && (timeout < 100));
-    if (timeout >= 100) {
-        printk("timeout waiting for PHY Reset\n");
-        return -1;
-    }
-    if (!dev->have_hwaddr && smsc95xx_init_mac_address(eth, dev) == 0)
-        dev->have_hwaddr = 1;
-    if (!dev->have_hwaddr) {
-        puts("Error: SMSC95xx: No MAC address set - set usbethaddr\n");
-        return -1;
-    }
-    if (smsc95xx_write_hwaddr(eth) < 0)
-        return -1;
-
-    ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("Read Value from HW_CFG : 0x%08x\n", read_buf);
-
-    read_buf |= HW_CFG_BIR;
-    ret = smsc95xx_write_reg(dev, HW_CFG, read_buf);
-    if (ret < 0)
-        return ret;
-
-    ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("Read Value from HW_CFG after writing "
-        "HW_CFG_BIR: 0x%08x\n", read_buf);
-
-#ifdef TURBO_MODE
-    if (dev->pusb_dev->speed == USB_SPEED_HIGH) {
-        burst_cap = DEFAULT_HS_BURST_CAP_SIZE / HS_USB_PKT_SIZE;
-        dev->rx_urb_size = DEFAULT_HS_BURST_CAP_SIZE;
-    } else {
-        burst_cap = DEFAULT_FS_BURST_CAP_SIZE / FS_USB_PKT_SIZE;
-        dev->rx_urb_size = DEFAULT_FS_BURST_CAP_SIZE;
-    }
-#else
-    burst_cap = 0;
-    dev->rx_urb_size = MAX_SINGLE_PACKET_SIZE;
-#endif
-    printk("rx_urb_size=%ld\n", (ulong)dev->rx_urb_size);
-
-    ret = smsc95xx_write_reg(dev, BURST_CAP, burst_cap);
-    if (ret < 0)
-        return ret;
-
-    ret = smsc95xx_read_reg(dev, BURST_CAP, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("Read Value from BURST_CAP after writing: 0x%08x\n", read_buf);
-
-    read_buf = DEFAULT_BULK_IN_DELAY;
-    ret = smsc95xx_write_reg(dev, BULK_IN_DLY, read_buf);
-    if (ret < 0)
-        return ret;
-
-    ret = smsc95xx_read_reg(dev, BULK_IN_DLY, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("Read Value from BULK_IN_DLY after writing: "
-            "0x%08x\n", read_buf);
-
-    ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("Read Value from HW_CFG: 0x%08x\n", read_buf);
-
-#ifdef TURBO_MODE
-    read_buf |= (HW_CFG_MEF | HW_CFG_BCE);
-#endif
-    read_buf &= ~HW_CFG_RXDOFF;
-
-#define NET_IP_ALIGN 0
-    read_buf |= NET_IP_ALIGN << 9;
-
-    ret = smsc95xx_write_reg(dev, HW_CFG, read_buf);
-    if (ret < 0)
-        return ret;
-
-    ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("Read Value from HW_CFG after writing: 0x%08x\n", read_buf);
-
-    write_buf = 0xFFFFFFFF;
-    ret = smsc95xx_write_reg(dev, INT_STS, write_buf);
-    if (ret < 0)
-        return ret;
-
-    ret = smsc95xx_read_reg(dev, ID_REV, &read_buf);
-    if (ret < 0)
-        return ret;
-    printk("ID_REV = 0x%08x\n", read_buf);
-
-    /* Init Tx */
-    write_buf = 0;
-    ret = smsc95xx_write_reg(dev, FLOW, write_buf);
-    if (ret < 0)
-        return ret;
-
-    read_buf = AFC_CFG_DEFAULT;
-    ret = smsc95xx_write_reg(dev, AFC_CFG, read_buf);
-    if (ret < 0)
-        return ret;
-
-    ret = smsc95xx_read_reg(dev, MAC_CR, &dev->mac_cr);
-    if (ret < 0)
-        return ret;
-
-    /* Init Rx. Set Vlan */
-    write_buf = (u32)ETH_P_8021Q;
-    ret = smsc95xx_write_reg(dev, VLAN1, write_buf);
-    if (ret < 0)
-        return ret;
-
-    /* Disable checksum offload engines */
-    ret = smsc95xx_set_csums(dev, 0, 0);
-    if (ret < 0) {
-        printk("Failed to set csum offload: %d\n", ret);
-        return ret;
-    }
-    smsc95xx_set_multicast(dev);
-
-    if (smsc95xx_phy_initialize(dev) < 0)
-        return -1;
-    ret = smsc95xx_read_reg(dev, INT_EP_CTL, &read_buf);
-    if (ret < 0)
-        return ret;
-
-    /* enable PHY interrupts */
-    read_buf |= INT_EP_CTL_PHY_INT;
-
-    ret = smsc95xx_write_reg(dev, INT_EP_CTL, read_buf);
-    if (ret < 0)
-        return ret;
-
-    smsc95xx_start_tx_path(dev);
-    smsc95xx_start_rx_path(dev);
-
-    timeout = 0;
-    do {
-        link_detected = smsc95xx_mdio_read(dev, dev->phy_id, MII_BMSR)
-            & BMSR_LSTATUS;
-        if (!link_detected) {
-            if (timeout == 0)
-                printf("Waiting for Ethernet connection... ");
-            udelay(TIMEOUT_RESOLUTION * 1000);
-            timeout += TIMEOUT_RESOLUTION;
-        }
-    } while (!link_detected && timeout < PHY_CONNECT_TIMEOUT);
-    if (link_detected) {
-        if (timeout != 0)
-            printf("done.\n");
-    } else {
-        printf("unable to connect.\n");
-        return -1;
-    }
-    return 0;
-}
-
-static int smsc95xx_send(struct eth_device *eth, volatile void* packet,
-             int length)
-{
-    struct ueth_data *dev = (struct ueth_data *)eth->priv;
-    int err;
-    int actual_len;
-    u32 tx_cmd_a;
-    u32 tx_cmd_b;
-    unsigned char msg[PKTSIZE + sizeof(tx_cmd_a) + sizeof(tx_cmd_b)];
-
-    printk("** %s(), len %d, buf %#x\n", __func__, length, (int)msg);
-    if (length > PKTSIZE)
-        return -1;
-
-    tx_cmd_a = (u32)length | TX_CMD_A_FIRST_SEG | TX_CMD_A_LAST_SEG;
-    tx_cmd_b = (u32)length;
-    cpu_to_le32s(&tx_cmd_a);
-    cpu_to_le32s(&tx_cmd_b);
-
-    /* prepend cmd_a and cmd_b */
-    memcpy(msg, &tx_cmd_a, sizeof(tx_cmd_a));
-    memcpy(msg + sizeof(tx_cmd_a), &tx_cmd_b, sizeof(tx_cmd_b));
-    memcpy(msg + sizeof(tx_cmd_a) + sizeof(tx_cmd_b), (void *)packet,
-           length);
-    err = usb_bulk_msg(dev->pusb_dev,
-                usb_sndbulkpipe(dev->pusb_dev, dev->ep_out),
-                (void *)msg,
-                length + sizeof(tx_cmd_a) + sizeof(tx_cmd_b),
-                &actual_len,
-                USB_BULK_SEND_TIMEOUT);
-    printk("Tx: len = %u, actual = %u, err = %d\n",
-          length + sizeof(tx_cmd_a) + sizeof(tx_cmd_b),
-          actual_len, err);
-    return err;
-}
-
-static int smsc95xx_recv(struct eth_device *eth)
-{
-    struct ueth_data *dev = (struct ueth_data *)eth->priv;
     static unsigned char  recv_buf[AX_RX_URB_SIZE];
     unsigned char *buf_ptr;
     int err;
     int actual_len;
     u32 packet_len;
     int cur_buf_align;
+    struct tasklet_hrtimer *thr = container_of(timer, struct tasklet_hrtimer, timer);
+    tEdrvInstance *dev = container_of(thr, tEdrvInstance, poll_timer);
 
     printk("** %s()\n", __func__);
-    err = usb_bulk_msg(dev->pusb_dev,
-                usb_rcvbulkpipe(dev->pusb_dev, dev->ep_in),
+    err = usb_bulk_msg(dev->pUsbDev,
+                dev->ep_in,
                 (void *)recv_buf,
                 AX_RX_URB_SIZE,
                 &actual_len,
@@ -1703,11 +1777,12 @@ static int smsc95xx_recv(struct eth_device *eth)
           actual_len, err);
     if (err != 0) {
         printk("Rx: failed to receive\n");
-        return -1;
+        goto Exit;
     }
     if (actual_len > AX_RX_URB_SIZE) {
         printk("Rx: received too many bytes %d\n", actual_len);
-        return -1;
+        err = -EIO;
+        goto Exit;
     }
 
     buf_ptr = recv_buf;
@@ -1718,23 +1793,34 @@ static int smsc95xx_recv(struct eth_device *eth)
          */
         if (actual_len < sizeof(packet_len)) {
             printk("Rx: incomplete packet length\n");
-            return -1;
+            err = -EIO;
+            goto Exit;
         }
         memcpy(&packet_len, buf_ptr, sizeof(packet_len));
         le32_to_cpus(&packet_len);
         if (packet_len & RX_STS_ES) {
             printk("Rx: Error header=%#x", packet_len);
-            return -1;
+            err = -EIO;
+            goto Exit;
         }
         packet_len = ((packet_len & RX_STS_FL) >> 16);
 
         if (packet_len > actual_len - sizeof(packet_len)) {
             printk("Rx: too large packet: %d\n", packet_len);
-            return -1;
+            err = -EIO;
+            goto Exit;
         }
 
-        /* Notify net stack */
-        NetReceive(buf_ptr + sizeof(packet_len), packet_len - 4);
+        /* Notify state machine */
+        if (edrvInstance_l.initParam.pfnRxHandler != NULL)
+        {
+            tEdrvRxBuffer rxBuffer;
+            rxBuffer.bufferInFrame = kEdrvBufferLastInFrame;
+            rxBuffer.rxFrameSize = packet_len - 4;
+            rxBuffer.pBuffer = buf_ptr + sizeof packet_len;
+
+            edrvInstance_l.initParam.pfnRxHandler(&rxBuffer);
+        }
 
         /* Adjust for next iteration */
         actual_len -= sizeof(packet_len) + packet_len;
@@ -1748,119 +1834,9 @@ static int smsc95xx_recv(struct eth_device *eth)
             buf_ptr += align;
         }
     }
-    return err;
-}
-
-static void smsc95xx_halt(struct eth_device *eth)
-{
-    printk("** %s()\n", __func__);
-}
-
-/*
- * SMSC probing functions
- */
-void smsc95xx_eth_before_probe(void)
-{
-    curr_eth_dev = 0;
-}
-
-struct smsc95xx_dongle {
-    unsigned short vendor;
-    unsigned short product;
-};
-
-static const struct smsc95xx_dongle smsc95xx_dongles[] = {
-    { 0x0424, 0xec00 },    /* LAN9512/LAN9514 Ethernet */
-    { 0x0424, 0x9500 },    /* LAN9500 Ethernet */
-    { 0x0000, 0x0000 }    /* END - Do not remove */
-};
-
-/* Probe to see if a new device is actually an SMSC device */
-int smsc95xx_eth_probe(tEdrvInstance *dev, unsigned int ifnum,
-              struct ueth_data *ss)
-{
-    struct usb_interface *iface;
-    struct usb_interface_descriptor *iface_desc;
-    int i;
-
-    /* let's examine the device now */
-    iface = &dev->config.if_desc[ifnum];
-    iface_desc = &dev->config.if_desc[ifnum].desc;
-
-    for (i = 0; smsc95xx_dongles[i].vendor != 0; i++) {
-        if (dev->descriptor.idVendor == smsc95xx_dongles[i].vendor &&
-            dev->descriptor.idProduct == smsc95xx_dongles[i].product)
-            /* Found a supported dongle */
-            break;
-    }
-    if (smsc95xx_dongles[i].vendor == 0)
-        return 0;
-
-    /* At this point, we know we've got a live one */
-    printk("\n\nUSB Ethernet device detected\n");
-    memset(ss, '\0', sizeof(struct ueth_data));
-
-    /* Initialize the ueth_data structure with some useful info */
-    ss->ifnum = ifnum;
-    ss->pusb_dev = dev;
-    ss->subclass = iface_desc->bInterfaceSubClass;
-    ss->protocol = iface_desc->bInterfaceProtocol;
-
-    /*
-     * We are expecting a minimum of 3 endpoints - in, out (bulk), and int.
-     * We will ignore any others.
-     */
-    for (i = 0; i < iface_desc->bNumEndpoints; i++) {
-        /* is it an BULK endpoint? */
-        if ((iface->ep_desc[i].bmAttributes &
-             USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_BULK) {
-            if (iface->ep_desc[i].bEndpointAddress & USB_DIR_IN)
-                ss->ep_in =
-                    iface->ep_desc[i].bEndpointAddress &
-                    USB_ENDPOINT_NUMBER_MASK;
-            else
-                ss->ep_out =
-                    iface->ep_desc[i].bEndpointAddress &
-                    USB_ENDPOINT_NUMBER_MASK;
-        }
-
-        /* is it an interrupt endpoint? */
-        if ((iface->ep_desc[i].bmAttributes &
-            USB_ENDPOINT_XFERTYPE_MASK) == USB_ENDPOINT_XFER_INT) {
-            ss->ep_int = iface->ep_desc[i].bEndpointAddress &
-                USB_ENDPOINT_NUMBER_MASK;
-            ss->irqinterval = iface->ep_desc[i].bInterval;
-        }
-    }
-    printk("Endpoints In %d Out %d Int %d\n",
-          ss->ep_in, ss->ep_out, ss->ep_int);
-
-    /* Do some basic sanity checks, and bail if we find a problem */
-    if (usb_set_interface(dev, iface_desc->bInterfaceNumber, 0) ||
-        !ss->ep_in || !ss->ep_out || !ss->ep_int) {
-        printk("Problems with device\n");
-        return 0;
-    }
-    dev->privptr = (void *)ss;
-    return 1;
-}
-
-int smsc95xx_eth_get_info(tEdrvInstance *dev, struct ueth_data *ss,
-                struct eth_device *eth)
-{
-    printk("** %s()\n", __func__);
-    if (!eth) {
-        printk("%s: missing parameter.\n", __func__);
-        return 0;
-    }
-    sprintf(eth->name, "SMSC%d", curr_eth_dev++);
-    eth->init = smsc95xx_init;
-    eth->send = smsc95xx_send;
-    eth->recv = smsc95xx_recv;
-    eth->halt = smsc95xx_halt;
-    eth->write_hwaddr = smsc95xx_write_hwaddr;
-    eth->priv = ss;
-    return 1;
+Exit:
+    return HRTIMER_RESTART;
+    //return err;
 }
 
 /// \}
