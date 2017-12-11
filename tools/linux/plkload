@@ -168,13 +168,39 @@ while read line; do
                     echo "$i) $lspci"
                     if [ -z $devs ] ; then
                         devs="$pciid"
-                        drivers="$driver"
+                        drivers="pci/drivers/$driver"
                     else
                         devs="$devs,$pciid"
-                        drivers="$drivers,$driver"
+                        drivers="$drivers,pci/drivers/$driver"
                     fi
                 fi
         done < <(lspci | grep "${devname}")
+    fi
+done < devices.txt
+while read line; do
+# FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
+# https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device
+    device=`echo $line | cut -f1 -d","`
+    devname=`echo $line | cut -f2 -d","`
+    driver=`echo $line | cut -f3 -d","`
+
+    if echo "$moduleId" | grep -q "$device" ; then
+        for dev in /sys/bus/usb/devices/*; do
+            usbid=${dev#*/devices/}
+            drv=$(ls -dl $dev/driver)
+            drv=${drv#*/drivers/}
+            if [ "$drv" = "$driver" ] then
+                let i=i+1
+                echo "$i) $driver ($drv)"
+                if [ -z $devs ] ; then
+                    devs="$usbid"
+                    drivers="usb/drivers/$driver"
+                else
+                    devs="$devs,$usbid"
+                    drivers="$drivers,usb/drivers/$driver"
+                fi
+            fi
+        done
     fi
 done < devices.txt
 
@@ -186,11 +212,11 @@ elif [ $i -eq 0 ] ; then
     loadfail
 fi
 
-pciid=`echo $devs | cut -f$num -d","`
+devid=`echo $devs | cut -f$num -d","`
 driver=`echo $drivers | cut -f$num -d","`
 
-echo "unbinding PCI device $pciid"
-echo -n $pciid > /sys/bus/pci/drivers/${driver}/unbind
+echo "unbinding ${drivers#/*} device $devid"
+echo -n $devid > /sys/bus/${driver}/unbind
 
 ###############################################################################
 #
