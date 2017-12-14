@@ -104,6 +104,7 @@ while read line; do
         done < <(lspci | grep "${devname}")
     fi
 done < devices.txt
+
 while read line; do
 # FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
 # https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device

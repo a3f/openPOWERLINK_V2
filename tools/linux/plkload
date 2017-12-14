@@ -177,6 +177,7 @@ while read line; do
         done < <(lspci | grep "${devname}")
     fi
 done < devices.txt
+
 while read line; do
 # FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
 # https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device
@@ -189,7 +190,7 @@ while read line; do
             usbid=${dev#*/devices/}
             drv=$(ls -dl $dev/driver)
             drv=${drv#*/drivers/}
-            if [ "$drv" = "$driver" ] then
+            if [ "$drv" = "$driver" ] ; then
                 let i=i+1
                 echo "$i) $driver ($drv)"
                 if [ -z $devs ] ; then
