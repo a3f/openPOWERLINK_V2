@@ -887,8 +887,6 @@ static struct usb_driver edrvDriver_l = {
     .disable_hub_initiated_lpm = 1,
 };
 
-module_usb_driver(edrvDriver_l);
-
 //============================================================================//
 //            P U B L I C   F U N C T I O N S                                 //
 //============================================================================//
@@ -940,17 +938,14 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     }
 
     // local MAC address might have been changed in initOneUsbDev
-    printk("%s local MAC = %pM\n", edrvInstance_l.initParam.aMacAddr[i]);
-
-    // FIXME figure out how to use USB interrupts
-    tasklet_hrtimer_init(&edrvInstance_l.poll_timer, smsc95xx_recv, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+    printk("%s local MAC = %pM\n", __func__, edrvInstance_l.initParam.aMacAddr);
 
     return kErrorOk;
 }
 
 //------------------------------------------------------------------------------
 /**
-  \brief  Shut down Ethernet driver
+\brief  Shut down Ethernet driver
 
 This function shuts down the Ethernet driver.
 
@@ -965,6 +960,7 @@ tOplkError edrv_exit(void)
     {
         printk("%s calling usb_unregister_driver()\n", __func__);
         usb_deregister(&edrvDriver_l);
+        // clear buffer allocation
         bufalloc_exit(pBufAlloc_l);
         pBufAlloc_l = NULL;
         // clear driver structure
@@ -974,6 +970,7 @@ tOplkError edrv_exit(void)
     {
         printk("%s USB driver for openPOWERLINK already unregistered\n", __func__);
     }
+    return kErrorOk;
 }
 
 //------------------------------------------------------------------------------
@@ -1241,7 +1238,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
         if (ret < 0)
             return ret;
-        udelay(10 * 1000);
+        mdelay(10);
         timeout++;
     } while ((read_buf & HW_CFG_LRST) && (timeout < 100));
 
@@ -1260,7 +1257,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         ret = smsc95xx_read_reg(dev, PM_CTRL, &read_buf);
         if (ret < 0)
             return ret;
-        udelay(10 * 1000);
+        mdelay(10);
         timeout++;
     } while ((read_buf & PM_CTL_PHY_RST) && (timeout < 100));
     if (timeout >= 100) {
@@ -1409,7 +1406,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         if (!link_detected) {
             if (timeout == 0)
                 printk("Waiting for Ethernet connection... ");
-            udelay(TIMEOUT_RESOLUTION * 1000);
+            mdelay(TIMEOUT_RESOLUTION);
             timeout += TIMEOUT_RESOLUTION;
         }
     } while (!link_detected && timeout < PHY_CONNECT_TIMEOUT);
@@ -1420,6 +1417,9 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         printk("unable to connect.\n");
         return -EBUSY;
     }
+
+    // FIXME figure out how to use USB interrupts
+    tasklet_hrtimer_init(&dev->poll_timer, smsc95xx_recv, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
     tasklet_hrtimer_start(&dev->poll_timer, ktime_set(0, 1000*1000), HRTIMER_MODE_REL);
     return 0;
@@ -1670,6 +1670,7 @@ static void smsc95xx_init_mac_address(tEdrvInstance *inst)
             from = "read from EEPROM";
     } else { /* No eeprom, or eeprom values are invalid. Generating a random MAC address */
         eth_random_addr(mac);
+        from = "randomly generated";
     }
 
     printk("MAC address was %s: %pM\n", from, mac);
@@ -1757,7 +1758,7 @@ static void smsc95xx_start_rx_path(tEdrvInstance *dev)
 
 static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer)
 {
-    static unsigned char  recv_buf[AX_RX_URB_SIZE];
+    static unsigned char  recv_buf[AX_RX_URB_SIZE]; /* kzalloc instead? */
     unsigned char *buf_ptr;
     int err;
     int actual_len;
@@ -1772,7 +1773,9 @@ static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer)
                 (void *)recv_buf,
                 AX_RX_URB_SIZE,
                 &actual_len,
-                USB_BULK_RECV_TIMEOUT);
+                500);
+    if (err == -ETIMEDOUT)
+        goto Exit;
     printk("Rx: len = %u, actual = %u, err = %d\n", AX_RX_URB_SIZE,
           actual_len, err);
     if (err != 0) {

@@ -5,14 +5,18 @@ DEBUG_LVL ?= 0xC0000000L # only warnings/errors
 CMAKE     ?= cmake
 CCMAKE    ?= ccmake
 
-.PHONY: oplk_stack oplk_stack_release oplk_stack_debug demo_mn demo_cn pcap_stack kernel_stack
+.PHONY: oplk oplk_stack oplk_stack_release oplk_stack_debug pcp_edrv kernel_edrv demo_mn demo_cn pcap_stack kernel_stack test_rpi select_drivers configure_demo_mn
 
 define make_and_install
 make -C $(dir $<)
 make -C $(dir $<) install
 endef
 
-oplk: oplk_stack kernel_edrv demo_cn
+oplk: oplk_stack kernel_edrv demo_mn
+
+test_rpi: bin/linux/armv7l/demo_mn_console/demo_mn_console bin/linux/armv7l/oplkdrv_kernelmodule_edrv/oplksmsc95xxmn.ko
+	cd bin/linux/armv7l/oplkdrv_kernelmodule_edrv && sudo ./plkload oplksmsc95xxmn.ko
+	cd bin/linux/armv7l/demo_mn_console && sudo ./demo_mn_console
 
 oplk_stack: oplk_stack_release oplk_stack_debug
 
@@ -43,6 +47,10 @@ demo_cn: apps/demo_cn_console/build/linux/Makefile
 
 select_drivers:
 	cd drivers/linux/drv_kernelmod_edrv/build && ccmake -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ..
+
+configure_demo_mn:
+	cd apps/demo_mn_console/build/linux && ccmake -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ../..
+
 drivers/linux/drv_kernelmod_edrv/build/Makefile:
 	@echo :: Configuring for ${BUILD_TYPE}...
 	cd $(dir $@) && $(CMAKE) -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ..
