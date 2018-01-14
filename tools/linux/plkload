@@ -189,7 +189,7 @@ while read line; do
             usbid=${dev#*/devices/}
             drv=$(ls -dl $dev/driver)
             drv=${drv#*/drivers/}
-            if [ "$drv" = "$driver" ] then
+            if [ "$drv" = "$driver" ]; then
                 let i=i+1
                 echo "$i) $driver ($drv)"
                 if [ -z $devs ] ; then

@@ -57,6 +57,10 @@ drivers/linux/drv_kernelmod_edrv/build/Makefile:
 drivers/linux/drv_daemon_pcap/build/Makefile:
 	@echo :: Configuring for ${BUILD_TYPE}...
 	cd $(dir $@) && $(CMAKE) -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ..
+apps/demo_mn_console/build/linux/Makefile:
+	@echo :: Configuring for ${BUILD_TYPE}...
+	cd $(dir $@) && $(CMAKE) -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCFG_BUILD_KERNEL_STACK="Linux Kernel Module" ..
+
 %/release/Makefile:
 	@echo :: Configuring for Release...
 	mkdir -p $(dir $@)
