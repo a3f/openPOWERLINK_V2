@@ -65,6 +65,7 @@ loadfail()
 module=
 setprio=false
 tracing=nop
+keep_loaded_driver=false
 
 ###############################################################################
 # Read command line arguments
@@ -74,6 +75,7 @@ do
     case "$1" in
         -s)     setprio=true;;
         -t)     tracing=$2; shift;;
+        -k)     keep_loaded_driver=true;;
         --)     shift; break;;
         -h)     usage ;;
         *)      module=$1; shift; break;;
@@ -149,101 +151,108 @@ moduleId=`basename $module .ko`
 # strip off last two characters (mn/cn)
 moduleId=${moduleId:0:${#moduleId}-2}
 
+if [[ "$moduleId" =~ "generic" ]]; then
+    keep_loaded_driver=true
+fi
+
+
 ###############################################################################
 #
 # Check if suitable ethernet card is available
 # If we find more than one ethernet card we provide a prompt to select one.
 #
-let i=0
-while read line; do
-    device=`echo $line | cut -f1 -d","`
-    devname=`echo $line | cut -f2 -d","`
-    driver=`echo $line | cut -f3 -d","`
+if !$keep_loaded_driver then
+    let i=0
+    while read line; do
+        device=`echo $line | cut -f1 -d","`
+        devname=`echo $line | cut -f2 -d","`
+        driver=`echo $line | cut -f3 -d","`
 
-    if echo "$moduleId" | grep -q "$device" ; then
-        while read lspci ; do
-                if [ ! -z "$lspci" ]; then
+        if echo "$moduleId" | grep -q "$device" ; then
+            while read lspci ; do
+                    if [ ! -z "$lspci" ]; then
+                        let i=i+1
+                        pciid=$(echo $lspci | awk "{printf \"0000:\"\$1}")
+                        echo "$i) $lspci"
+                        if [ -z $devs ] ; then
+                            devs="$pciid"
+                            drivers="pci/drivers/$driver"
+                        else
+                            devs="$devs,$pciid"
+                            drivers="$drivers,pci/drivers/$driver"
+                        fi
+                    fi
+            done < <(lspci | grep "${devname}")
+        fi
+    done < devices.txt
+    while read line; do
+    # FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
+    # https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device
+        device=`echo $line | cut -f1 -d","`
+        devname=`echo $line | cut -f2 -d","`
+        driver=`echo $line | cut -f3 -d","`
+
+        if echo "$moduleId" | grep -q "$device" ; then
+            for dev in /sys/bus/usb/devices/*; do
+                usbid=${dev#*/devices/}
+                drv=$(ls -dl $dev/driver)
+                drv=${drv#*/drivers/}
+                if [ "$drv" = "$driver" ]; then
                     let i=i+1
-                    pciid=$(echo $lspci | awk "{printf \"0000:\"\$1}")
-                    echo "$i) $lspci"
+                    echo "$i) $driver ($drv)"
                     if [ -z $devs ] ; then
-                        devs="$pciid"
-                        drivers="pci/drivers/$driver"
+                        devs="$usbid"
+                        drivers="usb/drivers/$driver"
                     else
-                        devs="$devs,$pciid"
-                        drivers="$drivers,pci/drivers/$driver"
+                        devs="$devs,$usbid"
+                        drivers="$drivers,usb/drivers/$driver"
                     fi
                 fi
-        done < <(lspci | grep "${devname}")
-    fi
-done < devices.txt
-while read line; do
-# FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
-# https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device
-    device=`echo $line | cut -f1 -d","`
-    devname=`echo $line | cut -f2 -d","`
-    driver=`echo $line | cut -f3 -d","`
+            done
+        fi
+    done < devices.txt
 
-    if echo "$moduleId" | grep -q "$device" ; then
-        for dev in /sys/bus/usb/devices/*; do
-            usbid=${dev#*/devices/}
-            drv=$(ls -dl $dev/driver)
-            drv=${drv#*/drivers/}
-            if [ "$drv" = "$driver" ]; then
-                let i=i+1
-                echo "$i) $driver ($drv)"
-                if [ -z $devs ] ; then
-                    devs="$usbid"
-                    drivers="usb/drivers/$driver"
-                else
-                    devs="$devs,$usbid"
-                    drivers="$drivers,usb/drivers/$driver"
+    while read line; do
+    # FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
+    # https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device
+        device=`echo $line | cut -f1 -d","`
+        devname=`echo $line | cut -f2 -d","`
+        driver=`echo $line | cut -f3 -d","`
+
+        if echo "$moduleId" | grep -q "$device" ; then
+            for dev in /sys/bus/usb/devices/*; do
+                usbid=${dev#*/devices/}
+                drv=$(ls -dl $dev/driver)
+                drv=${drv#*/drivers/}
+                if [ "$drv" = "$driver" ] ; then
+                    let i=i+1
+                    echo "$i) $driver ($drv)"
+                    if [ -z $devs ] ; then
+                        devs="$usbid"
+                        drivers="usb/drivers/$driver"
+                    else
+                        devs="$devs,$usbid"
+                        drivers="$drivers,usb/drivers/$driver"
+                    fi
                 fi
-            fi
-        done
+            done
+        fi
+    done < devices.txt
+
+    if [ $i -gt 1 ] ; then
+        read -p "Please select the ethernet controller to use > " num
+    elif [ $i -eq 1 ]; then
+        num=1
+    elif [ $i -eq 0 ] ; then
+        loadfail
     fi
-done < devices.txt
 
-while read line; do
-# FIXME Name isn't displayed (Mapping between lsusb output and usbid not readily available
-# https://unix.stackexchange.com/questions/242546/how-to-get-bus-id-of-an-usb-device
-    device=`echo $line | cut -f1 -d","`
-    devname=`echo $line | cut -f2 -d","`
-    driver=`echo $line | cut -f3 -d","`
+    devid=`echo $devs | cut -f$num -d","`
+    driver=`echo $drivers | cut -f$num -d","`
 
-    if echo "$moduleId" | grep -q "$device" ; then
-        for dev in /sys/bus/usb/devices/*; do
-            usbid=${dev#*/devices/}
-            drv=$(ls -dl $dev/driver)
-            drv=${drv#*/drivers/}
-            if [ "$drv" = "$driver" ] ; then
-                let i=i+1
-                echo "$i) $driver ($drv)"
-                if [ -z $devs ] ; then
-                    devs="$usbid"
-                    drivers="usb/drivers/$driver"
-                else
-                    devs="$devs,$usbid"
-                    drivers="$drivers,usb/drivers/$driver"
-                fi
-            fi
-        done
-    fi
-done < devices.txt
-
-if [ $i -gt 1 ] ; then
-    read -p "Please select the ethernet controller to use > " num
-elif [ $i -eq 1 ]; then
-    num=1
-elif [ $i -eq 0 ] ; then
-    loadfail
+    echo "unbinding ${drivers#/*} device $devid"
+    echo -n $devid > /sys/bus/${driver}/unbind
 fi
-
-devid=`echo $devs | cut -f$num -d","`
-driver=`echo $drivers | cut -f$num -d","`
-
-echo "unbinding ${drivers#/*} device $devid"
-echo -n $devid > /sys/bus/${driver}/unbind
 
 ###############################################################################
 #

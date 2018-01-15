@@ -53,7 +53,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/moduleparam.h>
-#include <linux/debugfs.h>
 #include <linux/rtnetlink.h>
 
 #include <linux/sched.h>
@@ -94,9 +93,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // module global vars
 //------------------------------------------------------------------------------
 
-static char *pSlaveInterface; /* TODO */
-module_param(pslaveInterface, charp, 0);
-MODULE_PARM_DESC(slaveInteface, "Slave interface to claim");
+static char *slave_interface; /* TODO */
+module_param(slave_interface, charp, 0);
+MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
 //------------------------------------------------------------------------------
 // global function prototypes
@@ -138,7 +137,6 @@ static tBufAlloc* pBufAlloc_l = NULL;
 static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p);
 static int enslave(struct net_device *pSlaveDevice_p);
 static int emancipate(struct net_device *pSlaveDevice_p);
-static netdev_tx_t slave_start_xmit(struct sk_buff *pSkb_p, struct net_device *pSlaveDevice_p);
 static UINT8 getMacAdrs(UINT8* pMacAddr_p, struct net_device *pSlaveDevice_p, UINT8 size_p);
 static BOOL     getLinkStatus(struct net_device *pSlaveDevice_p);
 
@@ -173,15 +171,17 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     // clear instance structure
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
-    if (pEdrvInitParam_p->hwParam.pDevName == NULL)
-        return kErrorEdrvInit;
+    if (pEdrvInitParam_p->hwParam.pDevName)
+    {
+        DEBUG_LVL_EDRV_TRACE("%s() unexpected devname is %s\n", pEdrvInitParam_p->hwParam.pDevName);
+    }
 
     // save the init data
     edrvInstance_l.initParam = *pEdrvInitParam_p;
 
-    edrvInstance_l.initParam.hwParam.pDevName = pSlaveInterface;
-    if (!pSlaveInterface || !*pSlaveInterface) {
-        DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__, pSlaveDevice->name);
+    edrvInstance_l.initParam.hwParam.pDevName = slave_interface;
+    if (!slave_interface || !*slave_interface) {
+        DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__);
         return kErrorEdrvInit;
     }
 
@@ -209,7 +209,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
     rtnl_lock();
 
-    pSlaveDevice = __dev_get_by_name(&init_net, pSlaveInterface);
+    pSlaveDevice = __dev_get_by_name(&init_net, slave_interface);
 
     if (!pSlaveDevice) {
         DEBUG_LVL_ERROR_TRACE("%s() was supplied an invalid slave interface name\n", __func__, pSlaveDevice->name);
@@ -328,16 +328,16 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
          * tx handler! Otherwise the stack would hang! */
         /* build a socket buffer */
         struct sk_buff *skb;
-        BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
-                 sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
-        skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
-
-        // build a socket buffer
         skb = build_skb(pBuffer_p->pBuffer - TXBUF_HEADROOM, 0);
         if (!skb) {
             return kErrorEdrvNoFreeTxDesc;
         }
 
+        BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
+                 sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
+        skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
+
+        // build a socket buffer
         skb_reserve(skb, TXBUF_HEADROOM);
         memcpy(skb_put(skb, pBuffer_p->txFrameSize), pBuffer_p->pBuffer, pBuffer_p->txFrameSize);
         skb->dev = edrvInstance_l.pSlave;

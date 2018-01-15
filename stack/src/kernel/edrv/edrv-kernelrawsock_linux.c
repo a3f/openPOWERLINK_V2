@@ -70,6 +70,11 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // module global vars
 //------------------------------------------------------------------------------
 
+static char *slave_interface; /* TODO */
+module_param(slave_interface, charp, 0);
+MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
+
+
 //------------------------------------------------------------------------------
 // global function prototypes
 //------------------------------------------------------------------------------
@@ -144,11 +149,19 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     // clear instance structure
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
-    if (pEdrvInitParam_p->hwParam.pDevName == NULL)
-        return kErrorEdrvInit;
+    if (pEdrvInitParam_p->hwParam.pDevName)
+    {
+        DEBUG_LVL_EDRV_TRACE("%s() unexpected devname is %s\n", pEdrvInitParam_p->hwParam.pDevName);
+    }
 
     // save the init data
     edrvInstance_l.initParam = *pEdrvInitParam_p;
+
+    edrvInstance_l.initParam.hwParam.pDevName = slave_interface;
+    if (!slave_interface || !*slave_interface) {
+        DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__);
+        return kErrorEdrvInit;
+    }
 
     /* if no MAC address was specified read MAC address of used
      * Ethernet interface
