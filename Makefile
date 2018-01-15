@@ -8,8 +8,8 @@ CCMAKE    ?= ccmake
 .PHONY: oplk oplk_stack oplk_stack_release oplk_stack_debug pcp_edrv kernel_edrv demo_mn demo_cn pcap_stack kernel_stack test_rpi select_drivers configure_demo_mn
 
 define make_and_install
-make -C $(dir $<)
-make -C $(dir $<) install
+$(MAKE) -C $(dir $<)
+$(MAKE) -C $(dir $<) install
 endef
 
 oplk: oplk_stack kernel_edrv demo_mn
@@ -59,7 +59,7 @@ drivers/linux/drv_daemon_pcap/build/Makefile:
 	cd $(dir $@) && $(CMAKE) -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ..
 apps/demo_mn_console/build/linux/Makefile:
 	@echo :: Configuring for ${BUILD_TYPE}...
-	cd $(dir $@) && $(CMAKE) -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCFG_BUILD_KERNEL_STACK="Linux Kernel Module" ..
+	cd $(dir $@) && $(CMAKE) -DCFG_OPLK_MN=TRUE -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DCFG_BUILD_KERNEL_STACK="Linux Kernel Module" ../..
 
 %/release/Makefile:
 	@echo :: Configuring for Release...
@@ -76,12 +76,12 @@ apps/demo_mn_console/build/linux/Makefile:
 .PHONY: clean
 clean:
 	rm -rf bin/linux
-	make -C stack/build/linux/release clean || true
-	make -C stack/build/linux/debug clean || true
-	make -C drivers/linux/drv_daemon_pcap/build clean || true
-	make -C drivers/linux/drv_kernelmod_edrv/build clean || true
-	make -C apps/demo_mn_console/build/linux clean || true
-	make -C apps/demo_cn_console/build/linux clean || true
+	$(MAKE) -C stack/build/linux/release clean || true
+	$(MAKE) -C stack/build/linux/debug clean || true
+	$(MAKE) -C drivers/linux/drv_daemon_pcap/build clean || true
+	$(MAKE) -C drivers/linux/drv_kernelmod_edrv/build clean || true
+	$(MAKE) -C apps/demo_mn_console/build/linux clean || true
+	$(MAKE) -C apps/demo_cn_console/build/linux clean || true
 
 .PHONY: distclean
 distclean:
