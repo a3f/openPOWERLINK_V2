@@ -87,7 +87,7 @@ fi
 # Check if suitable ethernet card is available
 # If we find more than one ethernet card we provide a prompt to select one.
 #
-if $keep_loaded_driver then
+if $keep_loaded_driver; then
     exit 0
 fi
 

@@ -161,7 +161,7 @@ fi
 # Check if suitable ethernet card is available
 # If we find more than one ethernet card we provide a prompt to select one.
 #
-if !$keep_loaded_driver then
+if ! $keep_loaded_driver; then
     let i=0
     while read line; do
         device=`echo $line | cut -f1 -d","`
