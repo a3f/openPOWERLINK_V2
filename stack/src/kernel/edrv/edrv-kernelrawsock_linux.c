@@ -50,6 +50,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/kernel.h>
 #include <linux/net.h>
 #include <linux/socket.h>
+#include <linux/netdevice.h>
 #include <linux/nsproxy.h>
 #include <linux/if_ether.h>
 #include <uapi/linux/if.h>
@@ -120,7 +121,7 @@ static tEdrvInstance edrvInstance_l;
 //------------------------------------------------------------------------------
 static void           packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataLen_p);
 static int            workerThread(void* pArgument_p);
-static void           getMacAdrs(const char* pIfName_p, UINT8* pMacAddr_p);
+static int            getMacAdrs(const char* pIfName_p, UINT8* pMacAddr_p);
 static struct socket *startSocket(void);
 static BOOL           getLinkStatus(const char* pIfName_p);
 
@@ -143,6 +144,7 @@ This function initializes the Ethernet driver.
 //------------------------------------------------------------------------------
 tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 {
+    int err;
     // Check parameter validity
     ASSERT(pEdrvInitParam_p != NULL);
 
@@ -173,8 +175,12 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         (edrvInstance_l.initParam.aMacAddr[4] == 0) &&
         (edrvInstance_l.initParam.aMacAddr[5] == 0))
     {   // read MAC address from controller
-        getMacAdrs(edrvInstance_l.initParam.hwParam.pDevName,
+        err = getMacAdrs(edrvInstance_l.initParam.hwParam.pDevName,
                    edrvInstance_l.initParam.aMacAddr);
+        if (err)
+        {
+            return kErrorEdrvInit;
+        }
     }
 
     edrvInstance_l.pTxSocket = startSocket();
@@ -686,28 +692,35 @@ This function gets the interface's MAC address.
 \param[out]     pMacAddr_p          Pointer to store MAC address
 */
 //------------------------------------------------------------------------------
-static void getMacAdrs(const char* pIfName_p, UINT8* pMacAddr_p)
+static int getMacAdrs(const char* pIfName_p, UINT8* pMacAddr_p)
 {
-    int             err;
-    struct socket  *sock;
-    struct ifreq    ifr;
+    int                err = 0;
+    struct net_device *dev;
+    struct net        *net_ns = current->nsproxy->net_ns; // or just &init_net?
 
-    err = sock_create_kern(current->nsproxy->net_ns, AF_INET, SOCK_DGRAM, 0, &sock);
+    /* we can't use kernel_sock_ioctl, because SIOCGIFHWADDR isn't handled by sock->ops->ioctl */
+    dev_load(net_ns, pIfName_p);
 
-    ifr.ifr_addr.sa_family = AF_INET;
-    strncpy(ifr.ifr_name, pIfName_p, IFNAMSIZ - 1);
+    rcu_read_lock();
+    dev = dev_get_by_name_rcu(net_ns, pIfName_p);
 
-    err = kernel_sock_ioctl(sock, SIOCGIFHWADDR, (long)&ifr);
-    if (err < 0)
+    if (!dev)
     {
-        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't get interface hardware address: %d\n", __func__, err);
+        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't find driver for interface %s\n", __func__, ifr.ifr_name);
+        err = -EINVAL;
+    }
+    else if (dev->addr_len != 6)
+    {
+        DEBUG_LVL_ERROR_TRACE("%s() Error!! Interface hardware address has %u bytes but 6 expected\n", __func__, dev->addr_len);
+        err = -EIO;
+    }
+    else
+    {
+        OPLK_MEMCPY(pMacAddr_p, dev->dev_addr, 6);
     }
 
-    sock_release(sock);
-
-    strncpy(ifr.ifr_name, edrvInstance_l.initParam.hwParam.pDevName, IFNAMSIZ-1);
-
-    OPLK_MEMCPY(pMacAddr_p, ifr.ifr_hwaddr.sa_data, 6);
+    rcu_read_unlock();
+    return err;
 }
 
 //------------------------------------------------------------------------------
