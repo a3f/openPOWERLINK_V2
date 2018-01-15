@@ -89,7 +89,7 @@ MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 //------------------------------------------------------------------------------
 #define EDRV_MAX_FRAME_SIZE     0x0600
 #ifndef TRACE
-#define TRACE(fmt, ...)
+#define TRACE printk
 #endif
 
 //------------------------------------------------------------------------------
@@ -103,12 +103,14 @@ This structure describes an instance of the Ethernet driver.
 typedef struct
 {
     tEdrvInitParam      initParam;                          ///< Init parameters
+    int                 ifIndex;                            ///< Interface index
     tEdrvTxBuffer*      pTransmittedTxBufferLastEntry;      ///< Pointer to the last entry of the transmitted TX buffer
     tEdrvTxBuffer*      pTransmittedTxBufferFirstEntry;     ///< Pointer to the first entry of the transmitted Tx buffer
     struct mutex        mutex;                              ///< Mutex for locking of critical sections
     struct completion   syncStart;                          ///< Completion for signaling the start of the worker thread
     struct socket*      pTxSocket;                          ///< Tx socket
     struct task_struct *pThread;                            ///< Handle of the worker thread
+    struct net_device  *pDev;                            ///< Handle of the worker thread
 } tEdrvInstance;
 
 //------------------------------------------------------------------------------
@@ -121,9 +123,9 @@ static tEdrvInstance edrvInstance_l;
 //------------------------------------------------------------------------------
 static void           packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataLen_p);
 static int            workerThread(void* pArgument_p);
-static int            getMacAdrs(const char* pIfName_p, UINT8* pMacAddr_p);
-static struct socket *startSocket(void);
-static BOOL           getLinkStatus(const char* pIfName_p);
+static int            getMacAdrs(struct net_device *pDev_p, UINT8* pMacAddr_p, int *pIfIndex_p);
+static struct socket *startSocket(int ifIndex_p);
+static BOOL           getLinkStatus(struct net_device *pDev_p);
 
 //============================================================================//
 //            P U B L I C   F U N C T I O N S                                 //
@@ -151,17 +153,20 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     // clear instance structure
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
-    if (pEdrvInitParam_p->hwParam.pDevName)
-    {
-        DEBUG_LVL_EDRV_TRACE("%s() unexpected devname is %s\n", pEdrvInitParam_p->hwParam.pDevName);
-    }
-
     // save the init data
     edrvInstance_l.initParam = *pEdrvInitParam_p;
 
     edrvInstance_l.initParam.hwParam.pDevName = slave_interface;
     if (!slave_interface || !*slave_interface) {
         DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__);
+        return kErrorEdrvInit;
+    }
+
+    dev_load(current->nsproxy->net_ns, slave_interface);
+    edrvInstance_l.pDev = dev_get_by_name(current->nsproxy->net_ns, slave_interface);
+    if (!edrvInstance_l.pDev)
+    {
+        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't find driver for interface %s\n", __func__, slave_interface);
         return kErrorEdrvInit;
     }
 
@@ -175,15 +180,15 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         (edrvInstance_l.initParam.aMacAddr[4] == 0) &&
         (edrvInstance_l.initParam.aMacAddr[5] == 0))
     {   // read MAC address from controller
-        err = getMacAdrs(edrvInstance_l.initParam.hwParam.pDevName,
-                   edrvInstance_l.initParam.aMacAddr);
+        err = getMacAdrs(edrvInstance_l.pDev,
+                   edrvInstance_l.initParam.aMacAddr, &edrvInstance_l.ifIndex);
         if (err)
         {
             return kErrorEdrvInit;
         }
     }
 
-    edrvInstance_l.pTxSocket = startSocket();
+    edrvInstance_l.pTxSocket = startSocket(edrvInstance_l.ifIndex);
     if (edrvInstance_l.pTxSocket == NULL)
     {
         return kErrorEdrvInit;
@@ -235,6 +240,8 @@ tOplkError edrv_exit(void)
     // Destroy the mutex
     mutex_destroy(&edrvInstance_l.mutex);
 
+    dev_put(edrvInstance_l.pDev);
+
     // Clear instance structure
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
@@ -282,7 +289,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     if (pBuffer_p->txBufferNumber.pArg != NULL)
         return kErrorInvalidOperation;
 
-    if (getLinkStatus(edrvInstance_l.initParam.hwParam.pDevName) == FALSE)
+    if (getLinkStatus(edrvInstance_l.pDev) == FALSE)
     {
         /* there's no link! We pretend that packet is sent and immediately call
          * tx handler! Otherwise the stack would hang! */
@@ -293,17 +300,11 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     }
     else
     {
-        struct msghdr msg;
         struct kvec iov;
+        struct msghdr msg = {};
 
         iov.iov_base = pBuffer_p->pBuffer;
         iov.iov_len = pBuffer_p->txFrameSize;
-
-        msg.msg_control = NULL;
-        msg.msg_controllen = 0;
-        msg.msg_flags = 0;
-        msg.msg_name = 0;
-        msg.msg_namelen = 0;
 
         mutex_lock(&edrvInstance_l.mutex);
         if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
@@ -584,7 +585,7 @@ static int workerThread(void* pArgument_p)
     allow_signal(SIGTERM);
 
     // Set up and activate the socket for live capture
-    pRxSocket = startSocket();
+    pRxSocket = startSocket(pInstance->ifIndex);
     if (pRxSocket == NULL)
     {
         return -1;
@@ -609,13 +610,13 @@ static int workerThread(void* pArgument_p)
    kfree(iov.iov_base);
 
    if (signal_pending(current) == SIGTERM)
-       DEBUG_LVL_ERROR_TRACE("%s() was cancelled normally.\n", __func__);
+       DEBUG_LVL_ERROR_TRACE("%s(): was cancelled normally.\n", __func__);
    else if (numBytes == 0)
-       DEBUG_LVL_ERROR_TRACE("%s ended because peer shutdown socket.\n", __func__);
+       DEBUG_LVL_ERROR_TRACE("%s(): ended because peer shutdown socket.\n", __func__);
    else if (numBytes > 0)
-       DEBUG_LVL_ERROR_TRACE("%s experienced an incomplete read: \n", __func__, numBytes);
+       DEBUG_LVL_ERROR_TRACE("%s(): experienced an incomplete read: %d\n", __func__, numBytes);
    else
-       DEBUG_LVL_ERROR_TRACE("%s ended because of an error: %d\n", __func__, numBytes);
+       DEBUG_LVL_ERROR_TRACE("%s(): ended because of an error: %d\n", __func__, numBytes);
 
    sock_release(pRxSocket);
 
@@ -631,12 +632,11 @@ This function configures the parameter for a socket and activates it.
 \return The function returns a pointer to a struct socket.
 */
 //------------------------------------------------------------------------------
-static struct socket *startSocket(void)
+static struct socket *startSocket(int ifIndex_p)
 {
     int                 err;
     struct sockaddr_ll  sll;
     struct socket      *sock;
-    struct ifreq        ifr = {};
     struct packet_mreq  mr  = {};
 
 
@@ -647,17 +647,8 @@ static struct socket *startSocket(void)
         return NULL;
     }
 
-    strncpy(ifr.ifr_name, edrvInstance_l.initParam.hwParam.pDevName, IFNAMSIZ-1);
-    err = kernel_sock_ioctl(sock, SIOCGIFINDEX, (long)&ifr);
-    if (err < 0)
-    {
-        sock_release(sock);
-        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't get interface index: %d\n", __func__, err);
-        return NULL;
-    }
-
     sll.sll_family   = AF_PACKET;
-    sll.sll_ifindex  = ifr.ifr_ifindex;
+    sll.sll_ifindex  = ifIndex_p;
     sll.sll_protocol = htons(ETH_P_ALL);
 
     err = kernel_bind(sock, (struct sockaddr *)&sll, sizeof(sll));
@@ -669,7 +660,7 @@ static struct socket *startSocket(void)
     }
 
     // Set promiscuous mode
-    mr.mr_ifindex = ifr.ifr_ifindex;
+    mr.mr_ifindex = ifIndex_p;
     mr.mr_type    = PACKET_MR_PROMISC;
     err = kernel_setsockopt(sock, SOL_PACKET, PACKET_ADD_MEMBERSHIP, (void*)&mr, sizeof mr);
     if (err < 0)
@@ -688,35 +679,28 @@ static struct socket *startSocket(void)
 
 This function gets the interface's MAC address.
 
-\param[in]      pIfName_p           Ethernet interface device name
+\param[in]      pDev_p              Pointer to net_device
 \param[out]     pMacAddr_p          Pointer to store MAC address
+\param[out]     pIfIndex_p          Pointer to store interface index
 */
 //------------------------------------------------------------------------------
-static int getMacAdrs(const char* pIfName_p, UINT8* pMacAddr_p)
+static int getMacAdrs(struct net_device *pDev_p, UINT8* pMacAddr_p, int *pIfIndex_p)
 {
     int                err = 0;
-    struct net_device *dev;
-    struct net        *net_ns = current->nsproxy->net_ns; // or just &init_net?
-
-    /* we can't use kernel_sock_ioctl, because SIOCGIFHWADDR isn't handled by sock->ops->ioctl */
-    dev_load(net_ns, pIfName_p);
 
     rcu_read_lock();
-    dev = dev_get_by_name_rcu(net_ns, pIfName_p);
 
-    if (!dev)
+    if (pDev_p->addr_len == ETH_ALEN)
     {
-        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't find driver for interface %s\n", __func__, ifr.ifr_name);
-        err = -EINVAL;
-    }
-    else if (dev->addr_len != 6)
-    {
-        DEBUG_LVL_ERROR_TRACE("%s() Error!! Interface hardware address has %u bytes but 6 expected\n", __func__, dev->addr_len);
-        err = -EIO;
+        /* we can't use kernel_sock_ioctl,
+         * because SIOCGIFHWADDR isn't handled by sock->ops->ioctl */
+        OPLK_MEMCPY(pMacAddr_p, pDev_p->dev_addr, ETH_ALEN);
+        *pIfIndex_p = pDev_p->ifindex;
     }
     else
     {
-        OPLK_MEMCPY(pMacAddr_p, dev->dev_addr, 6);
+        DEBUG_LVL_ERROR_TRACE("%s() Error!! Interface %s hardware address has %u bytes but 6 expected\n", __func__, pDev_p->name, pDev_p->addr_len);
+        err = -EIO;
     }
 
     rcu_read_unlock();
@@ -736,32 +720,12 @@ This function returns the interface link status.
 \retval FALSE   The link is down.
 */
 //------------------------------------------------------------------------------
-static BOOL getLinkStatus(const char* pIfName_p)
+static BOOL getLinkStatus(struct net_device* pDev_p)
 {
-    BOOL            fRunning;
-    struct ifreq    ethreq;
-    struct socket  *sock;
-    int err;
+    BOOL fRunning;
+    rcu_read_lock();
 
-    err = sock_create_kern(current->nsproxy->net_ns, AF_INET, SOCK_DGRAM, 0, &sock);
-    if (err < 0)
-    {
-        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't open socket to get link status: %d\n", __func__, err);
-    }
-
-    OPLK_MEMSET(&ethreq, 0, sizeof(ethreq));
-
-    /* set the name of the interface we wish to check */
-    strncpy(ethreq.ifr_name, pIfName_p, IFNAMSIZ);
-
-    /* grab flags associated with this interface */
-    kernel_sock_ioctl(sock, SIOCGIFFLAGS, (long)&ethreq);
-    if (err < 0)
-    {
-        DEBUG_LVL_ERROR_TRACE("%s() Error!! Can't get link status interface flag: %d\n", __func__, err);
-    }
-
-    if (ethreq.ifr_flags & IFF_RUNNING)
+    if (dev_get_flags(pDev_p) & IFF_RUNNING)
     {
         fRunning = TRUE;
     }
@@ -770,8 +734,7 @@ static BOOL getLinkStatus(const char* pIfName_p)
         fRunning = FALSE;
     }
 
-    sock_release(sock);
-
+    rcu_read_unlock();
     return fRunning;
 }
 
