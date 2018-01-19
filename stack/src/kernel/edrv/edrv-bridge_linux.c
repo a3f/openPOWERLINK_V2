@@ -122,7 +122,6 @@ This structure describes an instance of the Ethernet driver.
 typedef struct
 {
     tEdrvInitParam      initParam;                          ///< Init parameters
-    UINT8*              pTxBuf;                             ///< Pointer to the TX buffer
     BOOL                afTxBufUsed[EDRV_MAX_TX_BUFFERS];   ///< Array indicating the use of a specific TX buffer
     struct net_device  *pSlave;
 } tEdrvInstance;
@@ -191,19 +190,15 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         return kErrorNoResource;
     }
 
-    // allocate tx-buffers (TODO we could use dma_alloc_coherent too...)
-    edrvInstance_l.pTxBuf = kmalloc(EDRV_TX_BUFFER_SIZE, GFP_KERNEL); // FIXME use GFP_USER?
-    if (edrvInstance_l.pTxBuf == NULL)
-    {
-        DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_TX_BUFFER_SIZE);
-        return kErrorNoResource;
-    }
-
-
     for (i = 0; i < EDRV_MAX_TX_BUFFERS; i++)
     {
         bufData.bufferNumber = i;
-        bufData.pBuffer = edrvInstance_l.pTxBuf + (i * EDRV_MAX_SKB_DATA_SIZE);
+        bufData.pBuffer = kmalloc(EDRV_MAX_SKB_DATA_SIZE, GFP_KERNEL); // FIXME use GFP_USER?
+        if (bufData.pBuffer == NULL)
+        {
+            DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_MAX_SKB_DATA_SIZE);
+            return kErrorNoResource;
+        }
 
         bufalloc_addBuffer(pBufAlloc_l, &bufData);
     }
@@ -278,7 +273,6 @@ tOplkError edrv_exit(void)
     // Clear instance structure
     bufalloc_exit(pBufAlloc_l);
     pBufAlloc_l = NULL;
-    kfree(edrvInstance_l.pTxBuf);
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
     return kErrorOk;
@@ -309,6 +303,9 @@ This function sends the Tx buffer.
 \param[in,out]  pBuffer_p           Tx buffer descriptor
 
 \return The function returns a tOplkError error code.
+
+\bug XXX Now that I am calling the Tx handler in here, is this function supposed
+         to be reentrant?
 
 \ingroup module_edrv
 */
@@ -400,13 +397,6 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     if (pBuffer_p->maxBufferSize > EDRV_MAX_FRAME_SIZE)
     {
-        ret = kErrorEdrvNoFreeBufEntry;
-        goto Exit;
-    }
-
-    if (edrvInstance_l.pTxBuf == NULL)
-    {
-        printk("%s Tx buffers currently not allocated\n", __func__);
         ret = kErrorEdrvNoFreeBufEntry;
         goto Exit;
     }
