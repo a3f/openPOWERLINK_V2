@@ -1471,6 +1471,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
     temp |= EDRV_REGDW_CTRL_RST;
     EDRV_REGDW_WRITE(EDRV_REGDW_CTRL, temp);
 
+#if 0
     // wait until reset has finished and configuration from EEPROM was read
     for (i = EDRV_AUTO_READ_DONE_TIMEOUT; i > 0; i--)
     {
@@ -1487,6 +1488,9 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
         result = -EIO;
         goto ExitFail;
     }
+#else
+    msleep(10);
+#endif
 
     // disable interrupts
     EDRV_REGDW_WRITE(EDRV_REGDW_IMC, EDRV_REGDW_INT_MASK_ALL);
