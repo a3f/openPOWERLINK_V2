@@ -2,7 +2,7 @@
 ********************************************************************************
 \file   edrv-82573.c
 
-\brief  Implementation of Ethernet driver for Intel 82573
+\brief  Implementation of Ethernet driver for Intel 82573 and 8254x
 
 This file contains the implementation of the Ethernet driver for
 Intel 82573 Gigabit Ethernet Controller and compatible devices.
@@ -386,6 +386,33 @@ static struct pci_device_id aEdrvPciTbl_l[] =
     {0x8086, 0x150c, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},  // 82583V
     {0x8086, 0x10de, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},  // 82567LM
     {0x8086, 0x10d3, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},  // 82574L
+
+    {0x8086, 0x100E, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82540EM-A Desktop
+    {0x8086, 0x100F, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82545EM-A Copper
+    {0x8086, 0x1010, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82546EB-A1 Copper; Default  MAC
+    {0x8086, 0x1011, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82545EM-A Fiber
+    {0x8086, 0x1012, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82546EB-A1 Fiber;
+    {0x8086, 0x1013, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82541EI Cooper Default  MAC
+    {0x8086, 0x1015, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82540EM-A Mobile
+    {0x8086, 0x1016, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82540EP-A Mobile
+    {0x8086, 0x1017, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82540EP-A Desktop
+    {0x8086, 0x1018, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82541EI-B0 Mobile
+    {0x8086, 0x1019, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82547EI Copper
+    {0x8086, 0x101A, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82547EI-B0 Mobile
+    {0x8086, 0x101D, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82546EB-A1 Copper;
+    {0x8086, 0x1026, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82545GM-B Copper Default  MAC
+    {0x8086, 0x1027, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82545GM-B Fiber
+    {0x8086, 0x1028, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82545GM-B SerDes
+    {0x8086, 0x1076, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82541GI-B1 Cooper
+    {0x8086, 0x1076, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82541PI-C0 Cooper
+    {0x8086, 0x1077, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82541GI-B1 Mobile
+    {0x8086, 0x1078, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82541ER-C0 Cooper
+    {0x8086, 0x1079, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82546GB-B0 Copper;
+    {0x8086, 0x107A, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82546GB-B0 Fiber;
+    {0x8086, 0x107B, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82546GB-B0 SerDes;
+    {0x8086, 0x1107, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82544EI-A4 Copper Default  MAC
+    {0x8086, 0x1112, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0}, // 82544GC-A4 Copper Default  MAC
+
     {0, }
 };
 MODULE_DEVICE_TABLE(pci, aEdrvPciTbl_l);
@@ -1432,8 +1459,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
     }
     if (i == 0)
     {
-        result = -EIO;
-        goto ExitFail;
+        msleep(50); /* should be enough for reset */
     }
 
     // disable interrupts
