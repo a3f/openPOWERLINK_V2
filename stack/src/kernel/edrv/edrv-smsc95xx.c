@@ -163,6 +163,9 @@ GNU General Public License for more details.
 #endif
 
 #define EDRV_MAX_FRAME_SIZE         2048
+#define TXBUF_HEADROOM              16
+#define EDRV_MAX_USB_FRAME_SIZE     (TXBUF_HEADROOM + EDRV_MAX_FRAME_SIZE)
+#define EDRV_TX_BUFFER_SIZE         (EDRV_MAX_TX_BUFFERS * EDRV_MAX_USB_FRAME_SIZE)
 
 #define USB_CTRL_SET_TIMEOUT 5000
 #define USB_CTRL_GET_TIMEOUT 5000
@@ -932,13 +935,15 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     }
 
     // init and fill buffer allocation instance
-    if ((pBufAlloc_l = bufalloc_init(EDRV_MAX_TX_BUFFERS)) == NULL)
+    if ((pBufAlloc_l = bufalloc_init(EDRV_MAX_TX_BUFFERS)) == NULL) {
+        DEBUG_LVL_ERROR_TRACE("%s() bufalloc_init failed\n", __func__);
         return kErrorNoResource;
+    }
 
     for (i = 0; i < EDRV_MAX_TX_BUFFERS; i++)
     {
         bufData.bufferNumber = i;
-        bufData.pBuffer = edrvInstance_l.pTxBuf + (i * EDRV_MAX_FRAME_SIZE);
+        bufData.pBuffer = edrvInstance_l.pTxBuf + (i * EDRV_MAX_USB_FRAME_SIZE);
 
         bufalloc_addBuffer(pBufAlloc_l, &bufData);
     }
@@ -1012,13 +1017,17 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     u8 *packet = pBuffer_p->pBuffer;
     u32 length = pBuffer_p->txFrameSize;
-    int err = -E2BIG;
+    int err;
     int actual_len;
     u32 tx_cmd[2]; /* A & B */
 
     DEBUG_LVL_EDRV_TRACE("** %s(), len %d", __func__, length);
-    if (length > 1536)
-        goto Exit;
+    BUG_ON(pBuffer_p->is_lock_protected); /* XXX we aren't reentrant */
+
+    if (length > 1536) {
+        DEBUG_LVL_EDRV_TRACE("** %s(): %d > 1536. refusing...", __func__, length);
+        return kErrorEdrvNoFreeTxDesc;
+    }
 
     tx_cmd[0] = length | TX_CMD_A_FIRST_SEG | TX_CMD_A_LAST_SEG;
     tx_cmd[1] = length;
@@ -1034,15 +1043,20 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
                 length, &actual_len,
                 USB_BULK_SEND_TIMEOUT);
     DEBUG_LVL_EDRV_TRACE("Tx: len = %u, actual = %u, err = %d\n", length, actual_len, err);
+    if (err)
+    {
+        DEBUG_LVL_ERROR_TRACE("%s() usb_bulk_msg returned %d\n", __func__, err);
+        return kErrorInvalidOperation;
+    }
 
-Exit:
     if (pBuffer_p->pfnTxHandler != NULL)
     {
+        pBuffer_p->is_lock_protected = TRUE;
         pBuffer_p->pfnTxHandler(pBuffer_p);
+        pBuffer_p->is_lock_protected = FALSE;
     }
     return err ? kErrorGeneralError : kErrorOk;
 }
-
 
 //------------------------------------------------------------------------------
 /**
@@ -1077,9 +1091,10 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
     if (bufalloc_getBuffer(pBufAlloc_l, &bufData) != kErrorOk)
         return kErrorEdrvNoFreeBufEntry;
 
-    pBuffer_p->pBuffer = bufData.pBuffer + 16;
+    pBuffer_p->pBuffer = bufData.pBuffer + TXBUF_HEADROOM;
     pBuffer_p->txBufferNumber.value = bufData.bufferNumber;
-    pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE - 16;
+    pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
+    pBuffer_p->is_lock_protected = FALSE;
     edrvInstance_l.afTxBufUsed[bufData.bufferNumber] = TRUE;
 
     return kErrorOk;
@@ -1105,7 +1120,7 @@ tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
-    bufData.pBuffer = pBuffer_p->pBuffer - 16;
+    bufData.pBuffer = pBuffer_p->pBuffer - TXBUF_HEADROOM;
     bufData.bufferNumber = pBuffer_p->txBufferNumber.value;
 
     edrvInstance_l.afTxBufUsed[pBuffer_p->txBufferNumber.value] = FALSE;
@@ -1136,6 +1151,11 @@ tOplkError edrv_changeRxFilter(tEdrvFilter* pFilter_p,
                                UINT entryChanged_p,
                                UINT changeFlags_p)
 {
+    UNUSED_PARAMETER(pFilter_p);
+    UNUSED_PARAMETER(count_p);
+    UNUSED_PARAMETER(entryChanged_p);
+    UNUSED_PARAMETER(changeFlags_p);
+
     return kErrorOk; /* FIXME how to configure Rx Filters? */
 }
 
@@ -1154,6 +1174,8 @@ This function removes the multicast entry from the Ethernet controller.
 //------------------------------------------------------------------------------
 tOplkError edrv_clearRxMulticastMacAddr(const UINT8* pMacAddr_p)
 {
+    UNUSED_PARAMETER(pMacAddr_p);
+
     return kErrorOk;
 }
 
@@ -1172,6 +1194,8 @@ This function sets a multicast entry into the Ethernet controller.
 //------------------------------------------------------------------------------
 tOplkError edrv_setRxMulticastMacAddr(const UINT8* pMacAddr_p)
 {
+    UNUSED_PARAMETER(pMacAddr_p);
+
     return kErrorOk;
 }
 
@@ -1304,7 +1328,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         }
     } else {
         burst_cap = 0;
-        dev->rx_urb_size = EDRV_MAX_FRAME_SIZE;
+        dev->rx_urb_size = EDRV_MAX_USB_FRAME_SIZE;
     }
     DEBUG_LVL_EDRV_TRACE("rx_urb_size=%ld\n", (ulong)dev->rx_urb_size);
 
@@ -1425,6 +1449,14 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         return -EBUSY;
     }
 
+    // allocate tx-buffers (TODO we could use dma_alloc_coherent too...)
+    edrvInstance_l.pTxBuf = kmalloc(EDRV_TX_BUFFER_SIZE, GFP_KERNEL); // FIXME use GFP_USER?
+    if (edrvInstance_l.pTxBuf == NULL)
+    {
+        DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_TX_BUFFER_SIZE);
+        return kErrorNoResource;
+    }
+
     // FIXME figure out how to use USB interrupts
     tasklet_hrtimer_init(&dev->poll_timer, smsc95xx_recv, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 
@@ -1434,12 +1466,15 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
 
 static void removeOneUsbDev(struct usb_interface *pUsbInterface_p)
 {
-    if (edrvInstance_l.pUsbDev != interface_to_usbdev(pUsbInterface_p))
+    if (edrvInstance_l.pUsbDev != interface_to_usbdev(pUsbInterface_p)) {
+        DEBUG_LVL_EDRV_TRACE("%s() was called with a different smsc95xx?!\n", __func__);
         return;
+    }
 
-    /* That's it? */
+    /* XXX That's it? */
     tasklet_hrtimer_cancel(&edrvInstance_l.poll_timer);
     edrvInstance_l.pUsbDev = NULL;
+    kfree(edrvInstance_l.pTxBuf);
 }
 /*
  * Smsc95xx infrastructure commands
