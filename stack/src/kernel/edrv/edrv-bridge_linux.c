@@ -72,8 +72,10 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //============================================================================//
 
 #ifndef TRACE
-#define TRACE(...) printk(__VA_ARGS__)
+#define TRACE printk
 #endif
+#undef DEBUG_LVL_EDRV_TRACE
+#define DEBUG_LVL_EDRV_TRACE printk
 
 #ifndef EDRV_MAX_TX_BUFFERS
 #define EDRV_MAX_TX_BUFFERS      256             // Max no of Buffers
@@ -171,13 +173,10 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     // clear instance structure
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
-    if (pEdrvInitParam_p->hwParam.pDevName)
-    {
-        DEBUG_LVL_EDRV_TRACE("%s() unexpected devname is %s\n", pEdrvInitParam_p->hwParam.pDevName);
-    }
-
     // save the init data
     edrvInstance_l.initParam = *pEdrvInitParam_p;
+
+    DEBUG_LVL_EDRV_TRACE("%s() starting up...\n", __func__);
 
     edrvInstance_l.initParam.hwParam.pDevName = slave_interface;
     if (!slave_interface || !*slave_interface) {
@@ -188,13 +187,15 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     // init and fill buffer allocation instance
     if ((pBufAlloc_l = bufalloc_init(EDRV_MAX_TX_BUFFERS)) == NULL)
     {
+        DEBUG_LVL_ERROR_TRACE("%s() bufalloc_init failed\n", __func__);
         return kErrorNoResource;
     }
 
     // allocate tx-buffers (TODO we could use dma_alloc_coherent too...)
-    edrvInstance_l.pTxBuf = kmalloc(EDRV_TX_BUFFER_SIZE, GFP_KERNEL);
+    edrvInstance_l.pTxBuf = kmalloc(EDRV_TX_BUFFER_SIZE, GFP_KERNEL); // FIXME use GFP_USER?
     if (edrvInstance_l.pTxBuf == NULL)
     {
+        DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_TX_BUFFER_SIZE);
         return kErrorNoResource;
     }
 
@@ -212,7 +213,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     pSlaveDevice = __dev_get_by_name(&init_net, slave_interface);
 
     if (!pSlaveDevice) {
-        DEBUG_LVL_ERROR_TRACE("%s() was supplied an invalid slave interface name\n", __func__, pSlaveDevice->name);
+        DEBUG_LVL_ERROR_TRACE("%s() was supplied an invalid slave interface name: %s\n", __func__, pSlaveDevice->name);
         goto unlock;
     }
 
@@ -227,7 +228,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     {   // write MAC address to controller
         int res;
         struct sockaddr addr;
-        memcpy(addr.sa_data, edrvInstance_l.initParam.aMacAddr, 6);
+        memcpy(addr.sa_data, edrvInstance_l.initParam.aMacAddr, ETH_ALEN);
         addr.sa_family = pSlaveDevice->type;
         res = dev_set_mac_address(pSlaveDevice, &addr);
         if (res) {
@@ -235,19 +236,22 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
                     __func__, res, edrvInstance_l.initParam.aMacAddr);
             goto unlock;
         }
+        DEBUG_LVL_EDRV_TRACE("%s() %s's MAC address was set to %pM\n", __func__, pSlaveDevice->name, edrvInstance_l.initParam.aMacAddr);
     }
     else
     {   // read MAC address from controller
-        UINT8 bytes = getMacAdrs(edrvInstance_l.initParam.aMacAddr, pSlaveDevice, 6);
+        UINT8 bytes = getMacAdrs(edrvInstance_l.initParam.aMacAddr, pSlaveDevice, ETH_ALEN);
         if (bytes == 0) { /* generate a new mac address */
             eth_hw_addr_random(pSlaveDevice);
-        } else if (bytes != 6) {
+            DEBUG_LVL_EDRV_TRACE("%s() Generating random hardware address for %s\n", __func__, pSlaveDevice->name);
+        } else if (bytes != ETH_ALEN) {
             DEBUG_LVL_ERROR_TRACE("%s() %s doesn't have a 6 byte hardware address\n", __func__, pSlaveDevice->name);
             goto unlock;
         }
     }
 
     ret = kErrorOk;
+
 unlock:
     rtnl_unlock();
     return ret;
@@ -312,20 +316,26 @@ This function sends the Tx buffer.
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     netdev_tx_t     ret;
+    UINT            bufferNumber;
 
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
+    bufferNumber = pBuffer_p->txBufferNumber.value;
+    DEBUG_LVL_EDRV_TRACE("%s() was called.\n", __func__);
+
+
     FTRACE_MARKER("%s", __func__);
 
-    if (pBuffer_p->txBufferNumber.pArg != NULL)
+    if (pBuffer_p->txBufferNumber.value >= EDRV_MAX_TX_BUFFERS ||
+        edrvInstance_l.afTxBufUsed[bufferNumber] == FALSE)
+    {
         return kErrorInvalidOperation;
+    }
 
     /* FIXME this could be optimized by using netdev notification listener. Is that worth it? */
     if (getLinkStatus(edrvInstance_l.pSlave))
     {
-        /* there's no link! We pretend that packet is sent and immediately call
-         * tx handler! Otherwise the stack would hang! */
         /* build a socket buffer */
         struct sk_buff *skb;
         skb = build_skb(pBuffer_p->pBuffer - TXBUF_HEADROOM, 0);
@@ -345,16 +355,23 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
         if (ret != NETDEV_TX_OK)
         {
-            DEBUG_LVL_EDRV_TRACE("%s() dev_queue_xmit returned %d\n",
+            DEBUG_LVL_ERROR_TRACE("%s() dev_queue_xmit returned %d\n",
                                  __func__, ret);
             return kErrorInvalidOperation;
         }
+    } else {
+        /* there's no link! We pretend that packet is sent and immediately call
+         * tx handler! Otherwise the stack would hang! */
+        DEBUG_LVL_EDRV_TRACE("%s() slave link is down!\n", __func__);
     }
 
-    /* FIXME: transmission confirmation? e.g. via timestaping */
+    /* FIXME: _actual_ transmission confirmation? e.g. via timestaping */
     if (pBuffer_p->pfnTxHandler != NULL)
     {
+        DEBUG_LVL_EDRV_TRACE("%s() will call Tx handler now!\n", __func__);
+        pBuffer_p->is_lock_protected = TRUE;
         pBuffer_p->pfnTxHandler(pBuffer_p);
+        pBuffer_p->is_lock_protected = FALSE;
     }
 
     return kErrorOk;
@@ -389,7 +406,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     if (edrvInstance_l.pTxBuf == NULL)
     {
-        printk("%s Tx buffers currently not allocated\n", __FUNCTION__);
+        printk("%s Tx buffers currently not allocated\n", __func__);
         ret = kErrorEdrvNoFreeBufEntry;
         goto Exit;
     }
@@ -405,6 +422,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
     pBuffer_p->pBuffer = bufData.pBuffer + TXBUF_HEADROOM;
     pBuffer_p->txBufferNumber.value = bufData.bufferNumber;
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
+    pBuffer_p->is_lock_protected = FALSE;
     edrvInstance_l.afTxBufUsed[bufData.bufferNumber] = TRUE;
 
 Exit:
@@ -557,7 +575,10 @@ static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
     rxBuffer.pBuffer = skb->data;
 
     FTRACE_MARKER("%s RX", __func__);
-    pInstance->initParam.pfnRxHandler(&rxBuffer);
+    if (edrvInstance_l.initParam.pfnRxHandler != NULL)
+    {
+        pInstance->initParam.pfnRxHandler(&rxBuffer);
+    }
 
 out:
     consume_skb(skb);
@@ -661,7 +682,7 @@ static int enslave(struct net_device *pSlaveDevice_p)
     uman_set_carrier(uman);
 #endif
 
-    DEBUG_LVL_EDRV_TRACE("%s() Enslaving %s interface\n", pSlaveDevice_p->name);
+    DEBUG_LVL_EDRV_TRACE("%s() Enslaving %s interface\n", __func__, pSlaveDevice_p->name);
 
     return 0;
 
@@ -709,7 +730,7 @@ static int emancipate(struct net_device *pSlaveDevice_p)
     slave = uman_slave(uman);
     if (!slave) {
         /* not a slave of this uman */
-        DEBUG_LVL_ERROR_TRACE("%s() %s not enslaved\n", __func__, __func__, pSlaveDevice_p->name);
+        DEBUG_LVL_ERROR_TRACE("%s() %s not enslaved\n", __func__, pSlaveDevice_p->name);
         return -EINVAL;
     }
 
@@ -720,7 +741,7 @@ static int emancipate(struct net_device *pSlaveDevice_p)
      */
     netdev_rx_handler_unregister(pSlaveDevice_p);
 
-    DEBUG_LVL_EDRV_TRACE("%s() Releasing interface %s\n", pSlaveDevice_p->name);
+    DEBUG_LVL_EDRV_TRACE("%s() Releasing interface %s\n", __func__, pSlaveDevice_p->name);
 
 
 #if 0

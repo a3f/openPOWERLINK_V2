@@ -295,7 +295,9 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
          * tx handler! Otherwise the stack would hang! */
         if (pBuffer_p->pfnTxHandler != NULL)
         {
+            pBuffer_p->is_lock_protected = TRUE;
             pBuffer_p->pfnTxHandler(pBuffer_p);
+            pBuffer_p->is_lock_protected = FALSE;
         }
     }
     else
@@ -498,7 +500,10 @@ static void packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataL
         rxBuffer.pBuffer = pPktData_p;
 
         FTRACE_MARKER("%s RX", __func__);
-        pInstance->initParam.pfnRxHandler(&rxBuffer);
+        if (edrvInstance_l.initParam.pfnRxHandler != NULL)
+        {
+            pInstance->initParam.pfnRxHandler(&rxBuffer);
+        }
     }
     else
     {   // self generated traffic

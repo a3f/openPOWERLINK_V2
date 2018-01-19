@@ -164,6 +164,9 @@ struct sEdrvTxBuffer
     tEdrvTxBufferNumber txBufferNumber;     ///< Edrv Tx buffer number
     UINT8*              pBuffer;            ///< Pointer to the Tx buffer
     UINT                maxBufferSize;      ///< Maximum size of the Tx buffer
+    BOOL                is_lock_protected;  ///< FIXME shitty hack, is already protected by lock
+                                            ///  so no need to lock again (recursive spinlock
+                                            //   alternative)
 };
 
 /**
