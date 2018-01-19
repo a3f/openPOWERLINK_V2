@@ -1426,12 +1426,14 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
     result = pci_request_regions(pPciDev_p, DRV_NAME);
     if (result != 0)
     {
+        printk("%s: pci_request_regions failed\n", __FUNCTION__);
         goto ExitFail;
     }
 
     edrvInstance_l.pIoAddr = ioremap(pci_resource_start(pPciDev_p, 0), pci_resource_len(pPciDev_p, 0));
     if (edrvInstance_l.pIoAddr == NULL)
     {   // remap of controller's register space failed
+        printk("%s: ioremap failed\n", __FUNCTION__);
         result = -EIO;
         goto ExitFail;
     }
@@ -1481,6 +1483,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
     }
     if (i == 0)
     {
+        printk("%s: EEPROOM read timed out\n", __FUNCTION__);
         result = -EIO;
         goto ExitFail;
     }
@@ -1549,6 +1552,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
     result = request_irq(pPciDev_p->irq, edrvIrqHandler, IRQF_SHARED, DRV_NAME, pPciDev_p);
     if (result != 0)
     {
+        printk("%s: failed to request irq\n", __FUNCTION__);
         goto ExitFail;
     }
 
@@ -1565,6 +1569,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
                                                  &edrvInstance_l.pTxBufDma);
     if (edrvInstance_l.pTxBuf == NULL)
     {
+        printk("%s: failed to allocate tx buffers\n", __FUNCTION__);
         result = -ENOMEM;
         goto ExitFail;
     }
@@ -1574,6 +1579,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
                                                   &edrvInstance_l.pTxDescDma);
     if (edrvInstance_l.pTxDesc == NULL)
     {
+        printk("%s: failed to allocate tx descriptors\n", __FUNCTION__);
         result = -ENOMEM;
         goto ExitFail;
     }
@@ -1583,6 +1589,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
                                                   &edrvInstance_l.pRxDescDma);
     if (edrvInstance_l.pRxDesc == NULL)
     {
+        printk("%s: failed to allocate rx descriptors\n", __FUNCTION__);
         result = -ENOMEM;
         goto ExitFail;
     }
@@ -1608,6 +1615,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
         bufferPointer = __get_free_pages(GFP_KERNEL, order);
         if (bufferPointer == 0)
         {
+            printk("%s: no free pages for rx buffer\n", __FUNCTION__);
             result = -ENOMEM;
             goto ExitFail;
         }
@@ -1685,6 +1693,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
         if (pci_dma_mapping_error(edrvInstance_l.pPciDev, dmaAddr))
         {
             result = -ENOMEM;
+            printk("%s: can't get DMA streaming \n", __FUNCTION__); // whatever that means
             goto ExitFail;
         }
 
@@ -1737,6 +1746,7 @@ static int initOnePciDev(struct pci_dev* pPciDev_p, const struct pci_device_id* 
     if (i == 0)
     {
         result = -EIO;
+        printk("%s: Timed out waiting for linkup :-(\n", __FUNCTION__); // whatever that means
         goto ExitFail;
     }
 
