@@ -121,6 +121,12 @@ GNU General Public License for more details.
 #error "Linux Kernel versions older than 4.9.47 are not supported by this driver!"
 #endif
 
+#ifndef TRACE
+#define TRACE printk
+#endif
+#undef DEBUG_LVL_EDRV_TRACE
+#define DEBUG_LVL_EDRV_TRACE printk
+
 //------------------------------------------------------------------------------
 // module global vars
 //------------------------------------------------------------------------------
@@ -921,7 +927,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     edrvDriver_l.disconnect   = removeOneUsbDev;
 
     if (usb_register(&edrvDriver_l)) {
-        printk("smsc95xx: unable to register usb driver\n");
+        DEBUG_LVL_ERROR_TRACE("smsc95xx: unable to register usb driver\n");
         return kErrorNoResource;
     }
 
@@ -938,7 +944,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     }
 
     // local MAC address might have been changed in initOneUsbDev
-    printk("%s local MAC = %pM\n", __func__, edrvInstance_l.initParam.aMacAddr);
+    DEBUG_LVL_EDRV_TRACE("%s local MAC = %pM\n", __func__, edrvInstance_l.initParam.aMacAddr);
 
     return kErrorOk;
 }
@@ -958,7 +964,7 @@ tOplkError edrv_exit(void)
 {
     if (edrvDriver_l.name != NULL)
     {
-        printk("%s calling usb_unregister_driver()\n", __func__);
+        DEBUG_LVL_EDRV_TRACE("%s calling usb_unregister_driver()\n", __func__);
         usb_deregister(&edrvDriver_l);
         // clear buffer allocation
         bufalloc_exit(pBufAlloc_l);
@@ -968,7 +974,7 @@ tOplkError edrv_exit(void)
     }
     else
     {
-        printk("%s USB driver for openPOWERLINK already unregistered\n", __func__);
+        DEBUG_LVL_EDRV_TRACE("%s USB driver for openPOWERLINK already unregistered\n", __func__);
     }
     return kErrorOk;
 }
@@ -1010,7 +1016,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     int actual_len;
     u32 tx_cmd[2]; /* A & B */
 
-    printk("** %s(), len %d", __func__, length);
+    DEBUG_LVL_EDRV_TRACE("** %s(), len %d", __func__, length);
     if (length > 1536)
         goto Exit;
 
@@ -1027,7 +1033,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     err = usb_bulk_msg(edrvInstance_l.pUsbDev, edrvInstance_l.ep_out, packet,
                 length, &actual_len,
                 USB_BULK_SEND_TIMEOUT);
-    printk("Tx: len = %u, actual = %u, err = %d\n", length, actual_len, err);
+    DEBUG_LVL_EDRV_TRACE("Tx: len = %u, actual = %u, err = %d\n", length, actual_len, err);
 
 Exit:
     if (pBuffer_p->pfnTxHandler != NULL)
@@ -1036,6 +1042,7 @@ Exit:
     }
     return err ? kErrorGeneralError : kErrorOk;
 }
+
 
 //------------------------------------------------------------------------------
 /**
@@ -1062,7 +1069,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     if (edrvInstance_l.pTxBuf == NULL)
     {
-        printk("%s Tx buffers currently not allocated\n", __FUNCTION__);
+        DEBUG_LVL_ERROR_TRACE("%s Tx buffers currently not allocated\n", __func__);
         return kErrorEdrvNoFreeBufEntry;
     }
 
@@ -1188,7 +1195,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     struct usb_host_endpoint *in = NULL, *out = NULL, *intr = NULL;
 
     dev->pUsbDev = interface_to_usbdev(pUsbInterface_p);
-    printk("** %s()\n", __func__);
+    DEBUG_LVL_EDRV_TRACE("** %s()\n", __func__);
 
     for (tmp = 0; tmp < pUsbInterface_p->num_altsetting; tmp++) {
         struct usb_host_interface *alt = &pUsbInterface_p->altsetting[tmp];
@@ -1212,12 +1219,12 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
                 intr = ep;
             }
         }
-        printk("Endpoints In %d Out %d Int %d\n", dev->ep_in, dev->ep_out, dev->ep_int);
+        DEBUG_LVL_EDRV_TRACE("Endpoints In %d Out %d Int %d\n", dev->ep_in, dev->ep_out, dev->ep_int);
     }
 
     /* Do some basic sanity checks, and bail if we find a problem */
     if (!in || !out || !intr) {
-        printk("Problems with device: Endpoint is 0\n");
+        DEBUG_LVL_ERROR_TRACE("Problems with device: Endpoint is 0\n");
         return -EIO;
     }
 
@@ -1243,7 +1250,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     } while ((read_buf & HW_CFG_LRST) && (timeout < 100));
 
     if (timeout >= 100) {
-        printk("timeout waiting for completion of Lite Reset\n");
+        DEBUG_LVL_ERROR_TRACE("timeout waiting for completion of Lite Reset\n");
         return -EBUSY;
     }
 
@@ -1261,7 +1268,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         timeout++;
     } while ((read_buf & PM_CTL_PHY_RST) && (timeout < 100));
     if (timeout >= 100) {
-        printk("timeout waiting for PHY Reset\n");
+        DEBUG_LVL_ERROR_TRACE("timeout waiting for PHY Reset\n");
         return -EBUSY;
     }
     if (!is_zero_ether_addr(dev->initParam.aMacAddr)) {
@@ -1274,7 +1281,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
     if (ret < 0)
         return ret;
-    printk("Read Value from HW_CFG : 0x%08x\n", read_buf);
+    DEBUG_LVL_EDRV_TRACE("Read Value from HW_CFG : 0x%08x\n", read_buf);
 
     read_buf |= HW_CFG_BIR;
     ret = smsc95xx_write_reg(dev, HW_CFG, read_buf);
@@ -1284,7 +1291,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
     if (ret < 0)
         return ret;
-    printk("Read Value from HW_CFG after writing "
+    DEBUG_LVL_EDRV_TRACE("Read Value from HW_CFG after writing "
             "HW_CFG_BIR: 0x%08x\n", read_buf);
 
     if (turbo_mode) {
@@ -1299,7 +1306,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
         burst_cap = 0;
         dev->rx_urb_size = EDRV_MAX_FRAME_SIZE;
     }
-    printk("rx_urb_size=%ld\n", (ulong)dev->rx_urb_size);
+    DEBUG_LVL_EDRV_TRACE("rx_urb_size=%ld\n", (ulong)dev->rx_urb_size);
 
     ret = smsc95xx_write_reg(dev, BURST_CAP, burst_cap);
     if (ret < 0)
@@ -1308,7 +1315,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     ret = smsc95xx_read_reg(dev, BURST_CAP, &read_buf);
     if (ret < 0)
         return ret;
-    printk("Read Value from BURST_CAP after writing: 0x%08x\n", read_buf);
+    DEBUG_LVL_EDRV_TRACE("Read Value from BURST_CAP after writing: 0x%08x\n", read_buf);
 
     read_buf = DEFAULT_BULK_IN_DELAY;
     ret = smsc95xx_write_reg(dev, BULK_IN_DLY, read_buf);
@@ -1318,13 +1325,13 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     ret = smsc95xx_read_reg(dev, BULK_IN_DLY, &read_buf);
     if (ret < 0)
         return ret;
-    printk("Read Value from BULK_IN_DLY after writing: "
+    DEBUG_LVL_EDRV_TRACE("Read Value from BULK_IN_DLY after writing: "
             "0x%08x\n", read_buf);
 
     ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
     if (ret < 0)
         return ret;
-    printk("Read Value from HW_CFG: 0x%08x\n", read_buf);
+    DEBUG_LVL_EDRV_TRACE("Read Value from HW_CFG: 0x%08x\n", read_buf);
 
     if (turbo_mode)
         read_buf |= (HW_CFG_MEF | HW_CFG_BCE);
@@ -1342,7 +1349,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     ret = smsc95xx_read_reg(dev, HW_CFG, &read_buf);
     if (ret < 0)
         return ret;
-    printk("Read Value from HW_CFG after writing: 0x%08x\n", read_buf);
+    DEBUG_LVL_EDRV_TRACE("Read Value from HW_CFG after writing: 0x%08x\n", read_buf);
 
     write_buf = 0xFFFFFFFF;
     ret = smsc95xx_write_reg(dev, INT_STS, write_buf);
@@ -1352,7 +1359,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     ret = smsc95xx_read_reg(dev, ID_REV, &read_buf);
     if (ret < 0)
         return ret;
-    printk("ID_REV = 0x%08x\n", read_buf);
+    DEBUG_LVL_EDRV_TRACE("ID_REV = 0x%08x\n", read_buf);
 
     /* Init Tx */
     write_buf = 0;
@@ -1378,7 +1385,7 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
     /* Disable checksum offload engines */
     ret = smsc95xx_set_csums(dev, USE_TX_CSUM | USE_RX_CSUM);
     if (ret < 0) {
-        printk("Failed to set csum offload: %d\n", ret);
+        DEBUG_LVL_ERROR_TRACE("Failed to set csum offload: %d\n", ret);
         return ret;
     }
     smsc95xx_set_multicast(dev);
@@ -1405,16 +1412,16 @@ static int initOneUsbDev(struct usb_interface* pUsbInterface_p, const struct usb
             & BMSR_LSTATUS;
         if (!link_detected) {
             if (timeout == 0)
-                printk("Waiting for Ethernet connection... ");
+                DEBUG_LVL_ERROR_TRACE("Waiting for Ethernet connection... ");
             mdelay(TIMEOUT_RESOLUTION);
             timeout += TIMEOUT_RESOLUTION;
         }
     } while (!link_detected && timeout < PHY_CONNECT_TIMEOUT);
     if (link_detected) {
         if (timeout != 0)
-            printk("done.\n");
+            DEBUG_LVL_EDRV_TRACE("done.\n");
     } else {
-        printk("unable to connect.\n");
+        DEBUG_LVL_ERROR_TRACE("unable to connect.\n");
         return -EBUSY;
     }
 
@@ -1449,7 +1456,7 @@ static int smsc95xx_write_reg(tEdrvInstance *dev, u32 index, u32 data)
         00, index, &data, sizeof(data), USB_CTRL_SET_TIMEOUT
     );
     if (len != sizeof(data)) {
-        printk("smsc95xx_write_reg failed: index=%d, data=%d, len=%d", index, data, len);
+        DEBUG_LVL_ERROR_TRACE("smsc95xx_write_reg failed: index=%d, data=%d, len=%d", index, data, len);
         return -EIO;
     }
     return 0;
@@ -1464,7 +1471,7 @@ static int smsc95xx_read_reg(tEdrvInstance *dev, u32 index, u32 *data)
         USB_DIR_IN | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
         00, index, data, sizeof(data), USB_CTRL_GET_TIMEOUT);
     if (len != sizeof(data)) {
-        printk("smsc95xx_read_reg failed: index=%d, len=%d", index, len);
+        DEBUG_LVL_ERROR_TRACE("smsc95xx_read_reg failed: index=%d, len=%d", index, len);
         return -EIO;
     }
 
@@ -1482,7 +1489,7 @@ static int smsc95xx_phy_wait_not_busy(tEdrvInstance *dev)
     do {
         ret = smsc95xx_read_reg(dev, MII_ADDR, &val);
         if (ret < 0) {
-            printk("Error reading MII_ACCESS\n");
+            DEBUG_LVL_ERROR_TRACE("Error reading MII_ACCESS\n");
             return ret;
         }
 
@@ -1499,7 +1506,7 @@ static int smsc95xx_mdio_read(tEdrvInstance *dev, int phy_id, int idx)
 
     /* confirm MII not busy */
     if (smsc95xx_phy_wait_not_busy(dev)) {
-        printk("MII is busy in smsc95xx_mdio_read\n");
+        DEBUG_LVL_ERROR_TRACE("MII is busy in smsc95xx_mdio_read\n");
         return -EBUSY;
     }
 
@@ -1508,7 +1515,7 @@ static int smsc95xx_mdio_read(tEdrvInstance *dev, int phy_id, int idx)
     smsc95xx_write_reg(dev, MII_ADDR, addr);
 
     if (smsc95xx_phy_wait_not_busy(dev)) {
-        printk("Timed out reading MII reg %02X\n", idx);
+        DEBUG_LVL_ERROR_TRACE("Timed out reading MII reg %02X\n", idx);
         return -EBUSY;
     }
 
@@ -1524,7 +1531,7 @@ static void smsc95xx_mdio_write(tEdrvInstance *dev, int phy_id, int idx,
 
     /* confirm MII not busy */
     if (smsc95xx_phy_wait_not_busy(dev)) {
-        printk("MII is busy in smsc95xx_mdio_write\n");
+        DEBUG_LVL_ERROR_TRACE("MII is busy in smsc95xx_mdio_write\n");
         return;
     }
 
@@ -1536,7 +1543,7 @@ static void smsc95xx_mdio_write(tEdrvInstance *dev, int phy_id, int idx,
     smsc95xx_write_reg(dev, MII_ADDR, addr);
 
     if (smsc95xx_phy_wait_not_busy(dev))
-        printk("Timed out writing MII reg %02X\n", idx);
+        DEBUG_LVL_ERROR_TRACE("Timed out writing MII reg %02X\n", idx);
     // TODO error code?
 }
 
@@ -1549,7 +1556,7 @@ static int smsc95xx_eeprom_confirm_not_busy(tEdrvInstance *dev)
     do {
         ret = smsc95xx_read_reg(dev, E2P_CMD, &val);
         if (ret < 0) {
-            printk("Error reading E2P_CMD\n");
+            DEBUG_LVL_ERROR_TRACE("Error reading E2P_CMD\n");
             return ret;
         }
 
@@ -1559,7 +1566,7 @@ static int smsc95xx_eeprom_confirm_not_busy(tEdrvInstance *dev)
         udelay(40);
     } while (!time_after(jiffies, start_time + HZ));
 
-    printk("EEPROM is busy\n");
+    DEBUG_LVL_ERROR_TRACE("EEPROM is busy\n");
     return -EBUSY;
 }
 
@@ -1572,7 +1579,7 @@ static int smsc95xx_wait_eeprom(tEdrvInstance *dev)
     do {
         ret = smsc95xx_read_reg(dev, E2P_CMD, &val);
         if (ret < 0) {
-            printk("Error reading E2P_CMD\n");
+            DEBUG_LVL_ERROR_TRACE("Error reading E2P_CMD\n");
             return ret;
         }
 
@@ -1582,7 +1589,7 @@ static int smsc95xx_wait_eeprom(tEdrvInstance *dev)
     } while (!time_after(jiffies, start_time + HZ));
 
     if (val & (E2P_CMD_TIMEOUT | E2P_CMD_BUSY)) {
-        printk("EEPROM read operation timeout\n");
+        DEBUG_LVL_ERROR_TRACE("EEPROM read operation timeout\n");
         return -EIO;
     }
 
@@ -1650,7 +1657,7 @@ static int smsc95xx_phy_initialize(tEdrvInstance *dev)
         PHY_INT_MASK_DEFAULT);
     smsc95xx_mii_nway_restart(dev);
 
-    printk("phy initialised succesfully\n");
+    DEBUG_LVL_EDRV_TRACE("phy initialised succesfully\n");
     return 0;
 }
 
@@ -1673,7 +1680,7 @@ static void smsc95xx_init_mac_address(tEdrvInstance *inst)
         from = "randomly generated";
     }
 
-    printk("MAC address was %s: %pM\n", from, mac);
+    DEBUG_LVL_EDRV_TRACE("MAC address was %s: %pM\n", from, mac);
 }
 
 static int smsc95xx_write_hwaddr(tEdrvInstance *inst)
@@ -1682,7 +1689,7 @@ static int smsc95xx_write_hwaddr(tEdrvInstance *inst)
     int ret;
 
     /* set hardware address */
-    printk("** %s()\n", __func__);
+    DEBUG_LVL_EDRV_TRACE("** %s()\n", __func__);
     temp |= inst->initParam.aMacAddr[0] <<  0;
     temp |= inst->initParam.aMacAddr[1] <<  8;
     temp |= inst->initParam.aMacAddr[2] << 16;
@@ -1698,7 +1705,7 @@ static int smsc95xx_write_hwaddr(tEdrvInstance *inst)
     if (ret < 0)
         return ret;
 
-    printk("MAC %pM\n", inst->initParam.aMacAddr);
+    DEBUG_LVL_EDRV_TRACE("MAC %pM\n", inst->initParam.aMacAddr);
     return 0;
 }
 
@@ -1724,7 +1731,7 @@ static int smsc95xx_set_csums(tEdrvInstance *dev, int csums)
     if (ret < 0)
         return ret;
 
-    printk("COE_CR = 0x%08x\n", read_buf);
+    DEBUG_LVL_EDRV_TRACE("COE_CR = 0x%08x\n", read_buf);
     return 0;
 }
 
@@ -1767,7 +1774,7 @@ static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer)
     struct tasklet_hrtimer *thr = container_of(timer, struct tasklet_hrtimer, timer);
     tEdrvInstance *dev = container_of(thr, tEdrvInstance, poll_timer);
 
-    printk("** %s()\n", __func__);
+    DEBUG_LVL_EDRV_TRACE("** %s()\n", __func__);
     err = usb_bulk_msg(dev->pUsbDev,
                 dev->ep_in,
                 (void *)recv_buf,
@@ -1776,14 +1783,14 @@ static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer)
                 500);
     if (err == -ETIMEDOUT)
         goto Exit;
-    printk("Rx: len = %u, actual = %u, err = %d\n", AX_RX_URB_SIZE,
+    DEBUG_LVL_EDRV_TRACE("Rx: len = %u, actual = %u, err = %d\n", AX_RX_URB_SIZE,
           actual_len, err);
     if (err != 0) {
-        printk("Rx: failed to receive\n");
+        DEBUG_LVL_ERROR_TRACE("Rx: failed to receive\n");
         goto Exit;
     }
     if (actual_len > AX_RX_URB_SIZE) {
-        printk("Rx: received too many bytes %d\n", actual_len);
+        DEBUG_LVL_ERROR_TRACE("Rx: received too many bytes %d\n", actual_len);
         err = -EIO;
         goto Exit;
     }
@@ -1795,21 +1802,21 @@ static enum hrtimer_restart smsc95xx_recv(struct hrtimer *timer)
          * info. Extract data length.
          */
         if (actual_len < sizeof(packet_len)) {
-            printk("Rx: incomplete packet length\n");
+            DEBUG_LVL_ERROR_TRACE("Rx: incomplete packet length\n");
             err = -EIO;
             goto Exit;
         }
         memcpy(&packet_len, buf_ptr, sizeof(packet_len));
         le32_to_cpus(&packet_len);
         if (packet_len & RX_STS_ES) {
-            printk("Rx: Error header=%#x", packet_len);
+            DEBUG_LVL_ERROR_TRACE("Rx: Error header=%#x", packet_len);
             err = -EIO;
             goto Exit;
         }
         packet_len = ((packet_len & RX_STS_FL) >> 16);
 
         if (packet_len > actual_len - sizeof(packet_len)) {
-            printk("Rx: too large packet: %d\n", packet_len);
+            DEBUG_LVL_ERROR_TRACE("Rx: too large packet: %d\n", packet_len);
             err = -EIO;
             goto Exit;
         }
