@@ -85,8 +85,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define EDRV_MAX_SKB_DATA_SIZE (SKB_DATA_ALIGN(TXBUF_HEADROOM + EDRV_MAX_FRAME_SIZE) + \
                                 SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
 
-#define EDRV_TX_BUFFER_SIZE     (EDRV_MAX_TX_BUFFERS * EDRV_MAX_SKB_DATA_SIZE) // n * (MTU + 14 + 4)
-
 //------------------------------------------------------------------------------
 // const defines
 //------------------------------------------------------------------------------
@@ -321,6 +319,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     bufferNumber = pBuffer_p->txBufferNumber.value;
     DEBUG_LVL_EDRV_TRACE("%s() was called.\n", __func__);
 
+    BUG_ON(pBuffer_p->is_lock_protected); /* XXX we aren't reentrant */
 
     FTRACE_MARKER("%s", __func__);
 
