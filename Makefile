@@ -5,6 +5,7 @@ DEBUG_LVL ?= 0xC0000000L # only warnings/errors
 CMAKE     ?= cmake
 CCMAKE    ?= ccmake
 SLAVE_IF  ?= enp0s8
+ARCH      ?= x86_64
 
 .PHONY: oplk oplk_stack oplk_stack_release oplk_stack_debug pcp_edrv kernel_edrv demo_mn demo_cn pcap_stack kernel_stack test_rpi test_bridge select_drivers configure_demo_mn
 
@@ -19,10 +20,10 @@ test_rpi: bin/linux/armv7l/demo_mn_console/demo_mn_console bin/linux/armv7l/oplk
 	cd bin/linux/armv7l/oplkdrv_kernelmodule_edrv && sudo ./plkload oplksmsc95xxmn.ko
 	cd bin/linux/armv7l/demo_mn_console && sudo ./demo_mn_console
 
-test_bridge: bin/linux/x86_64/demo_mn_console/demo_mn_console bin/linux/x86_64/oplkdrv_kernelmodule_edrv/oplkgeneric_bridgemn.ko
-	cd bin/linux/x86_64/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
-	cd bin/linux/x86_64/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko slave_interface=$(SLAVE_IF)
-	cd bin/linux/x86_64/demo_mn_console && sudo ./demo_mn_console
+test_bridge: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_bridgemn.ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko slave_interface=$(SLAVE_IF)
+	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
 oplk_stack: oplk_stack_release oplk_stack_debug
 
