@@ -193,6 +193,7 @@ if ! $keep_loaded_driver; then
         driver=`echo $line | cut -f3 -d","`
 
         if echo "$moduleId" | grep -q "$device" ; then
+            if [ -z "$(ls -A /sys/bus/usb/devices)" ]; then break; fi
             for dev in /sys/bus/usb/devices/*; do
                 usbid=${dev#*/devices/}
                 drv=$(ls -dl $dev/driver)
@@ -220,6 +221,7 @@ if ! $keep_loaded_driver; then
         driver=`echo $line | cut -f3 -d","`
 
         if echo "$moduleId" | grep -q "$device" ; then
+            if [ -z "$(ls -A /sys/bus/usb/devices)" ]; then break; fi
             for dev in /sys/bus/usb/devices/*; do
                 usbid=${dev#*/devices/}
                 drv=$(ls -dl $dev/driver)
