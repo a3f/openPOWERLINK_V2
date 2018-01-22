@@ -287,8 +287,6 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
-    FTRACE_MARKER("%s", __func__);
-
     if (pBuffer_p->txBufferNumber.pArg != NULL)
         return kErrorInvalidOperation;
 
@@ -502,7 +500,6 @@ static void packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataL
         rxBuffer.rxFrameSize = dataLen_p;
         rxBuffer.pBuffer = pPktData_p;
 
-        FTRACE_MARKER("%s RX", __func__);
         if (edrvInstance_l.initParam.pfnRxHandler != NULL)
         {
             pInstance->initParam.pfnRxHandler(&rxBuffer);
@@ -510,7 +507,6 @@ static void packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataL
     }
     else
     {   // self generated traffic
-        FTRACE_MARKER("%s TX-receive", __func__);
 
         if (pInstance->pTransmittedTxBufferFirstEntry != NULL)
         {

@@ -74,8 +74,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #ifndef TRACE
 #define TRACE printk
 #endif
-#undef DEBUG_LVL_EDRV_TRACE
-#define DEBUG_LVL_EDRV_TRACE printk
 
 #ifndef EDRV_MAX_TX_BUFFERS
 #define EDRV_MAX_TX_BUFFERS      256             // Max no of Buffers
@@ -317,11 +315,8 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     ASSERT(pBuffer_p != NULL);
 
     bufferNumber = pBuffer_p->txBufferNumber.value;
-    DEBUG_LVL_EDRV_TRACE("%s() was called.\n", __func__);
 
     BUG_ON(pBuffer_p->is_lock_protected); /* XXX we aren't reentrant */
-
-    FTRACE_MARKER("%s", __func__);
 
     if (pBuffer_p->txBufferNumber.value >= EDRV_MAX_TX_BUFFERS ||
         edrvInstance_l.afTxBufUsed[bufferNumber] == FALSE)
@@ -335,7 +330,9 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
         /* build a socket buffer */
         struct sk_buff *skb;
         skb = build_skb(pBuffer_p->pBuffer - TXBUF_HEADROOM, 0);
-        if (!skb) {
+        if (IS_ERR_OR_NULL(skb)) {
+            DEBUG_LVL_ERROR_TRACE("%s() build_skb returned %d\n",
+                                __func__, PTR_ERR(skb));
             return kErrorEdrvNoFreeTxDesc;
         }
 
@@ -364,7 +361,6 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     /* FIXME: _actual_ transmission confirmation? e.g. via timestaping */
     if (pBuffer_p->pfnTxHandler != NULL)
     {
-        DEBUG_LVL_EDRV_TRACE("%s() will call Tx handler now!\n", __func__);
         pBuffer_p->is_lock_protected = TRUE;
         pBuffer_p->pfnTxHandler(pBuffer_p);
         pBuffer_p->is_lock_protected = FALSE;
@@ -563,7 +559,6 @@ static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
     rxBuffer.rxFrameSize = skb->len;
     rxBuffer.pBuffer = skb->data;
 
-    FTRACE_MARKER("%s RX", __func__);
     if (edrvInstance_l.initParam.pfnRxHandler != NULL)
     {
         pInstance->initParam.pfnRxHandler(&rxBuffer);
