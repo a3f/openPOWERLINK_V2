@@ -55,6 +55,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/mm.h>
 #include <linux/kthread.h>
 #include <linux/delay.h>
+#include <linux/uaccess.h>
 #include <asm/uaccess.h>
 #include <asm/page.h>
 #include <asm/atomic.h>

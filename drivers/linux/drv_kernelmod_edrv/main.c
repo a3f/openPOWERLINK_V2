@@ -59,6 +59,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/mm.h>
+#include <linux/uaccess.h>
 #include <asm/uaccess.h>
 #include <asm/page.h>
 #include <asm/atomic.h>
