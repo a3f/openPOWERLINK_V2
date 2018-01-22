@@ -302,6 +302,7 @@ This function sends the Tx buffer.
 
 \bug XXX Now that I am calling the Tx handler in here, is this function supposed
          to be reentrant?
+\note    This is called in interrupt context
 
 \ingroup module_edrv
 */
@@ -330,7 +331,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
         /* build a socket buffer */
         struct sk_buff *skb;
         skb = build_skb(pBuffer_p->pBuffer - TXBUF_HEADROOM, 0);
-        if (IS_ERR_OR_NULL(skb)) {
+        if (!skb) {
             DEBUG_LVL_ERROR_TRACE("%s() build_skb returned %d\n",
                                 __func__, PTR_ERR(skb));
             return kErrorEdrvNoFreeTxDesc;
@@ -344,6 +345,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
         skb_reserve(skb, TXBUF_HEADROOM);
         memcpy(skb_put(skb, pBuffer_p->txFrameSize), pBuffer_p->pBuffer, pBuffer_p->txFrameSize);
         skb->dev = edrvInstance_l.pSlave;
+        skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
         ret = dev_queue_xmit(skb);
 
         if (ret != NETDEV_TX_OK)
