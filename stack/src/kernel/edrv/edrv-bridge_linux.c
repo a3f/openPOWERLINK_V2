@@ -9,6 +9,7 @@ interface, which is then used exclusively for openPOWERLINK communication.
 
 \bug FIXME currently needs network namespace configuration, so user processes
            don't access the slave interface. Can exclusion be realized here?
+           e.g. with dev_change_net_namespace
 
 \ingroup module_edrv
 *******************************************************************************/
@@ -210,7 +211,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
     rtnl_lock();
 
-    pSlaveDevice = __dev_get_by_name(&init_net, slave_interface);
+    pSlaveDevice = __dev_get_by_name(current->nsproxy->net_ns, slave_interface);
 
     if (!pSlaveDevice) {
         DEBUG_LVL_ERROR_TRACE("%s() was supplied an invalid slave interface name: %s\n", __func__, pSlaveDevice->name);
