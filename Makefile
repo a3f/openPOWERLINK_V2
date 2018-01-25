@@ -16,13 +16,29 @@ endef
 
 oplk: oplk_stack kernel_edrv demo_mn
 
-test_rpi: bin/linux/armv7l/demo_mn_console/demo_mn_console bin/linux/armv7l/oplkdrv_kernelmodule_edrv/oplksmsc95xxmn.ko
-	cd bin/linux/armv7l/oplkdrv_kernelmodule_edrv && sudo ./plkload oplksmsc95xxmn.ko
-	cd bin/linux/armv7l/demo_mn_console && sudo ./demo_mn_console
+unload: bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplksmsc95xxmn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplk82573mn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_rawsockmn.ko || echo Nothing to unload
+
+test_rpi: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplksmsc95xxmn.ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplksmsc95xxmn.ko
+	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
+
+test_stock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplk82573mn.ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplk82573mn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplk82573mn.ko 
+	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
 test_bridge: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_bridgemn.ko
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko slave_interface=$(SLAVE_IF)
+	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
+
+test_rawsock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_rawsockmn.ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_rawsockmn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_rawsockmn.ko slave_interface=$(SLAVE_IF)
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
 oplk_stack: oplk_stack_release oplk_stack_debug
