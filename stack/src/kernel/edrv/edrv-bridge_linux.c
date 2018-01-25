@@ -95,6 +95,10 @@ static char *slave_interface; /* TODO */
 module_param(slave_interface, charp, 0);
 MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
+int qdisc_enabled = 1;
+module_param(qdisc_enabled, int, 0);
+MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled, 1 = enabled (default)");
+
 //------------------------------------------------------------------------------
 // global function prototypes
 //------------------------------------------------------------------------------
@@ -127,6 +131,7 @@ typedef struct
 //------------------------------------------------------------------------------
 static tEdrvInstance edrvInstance_l;
 static tBufAlloc* pBufAlloc_l = NULL;
+static int (*packet_xmit)(struct sk_buff *skb) = dev_queue_xmit;
 
 //------------------------------------------------------------------------------
 // local function prototypes
@@ -136,6 +141,7 @@ static int enslave(struct net_device *pSlaveDevice_p);
 static int emancipate(struct net_device *pSlaveDevice_p);
 static UINT8 getMacAdrs(UINT8* pMacAddr_p, struct net_device *pSlaveDevice_p, UINT8 size_p);
 static BOOL     getLinkStatus(struct net_device *pSlaveDevice_p);
+static int packet_direct_xmit(struct sk_buff *skb);
 
 
 //============================================================================//
@@ -178,6 +184,9 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__);
         return kErrorEdrvInit;
     }
+
+    if (qdisc_enabled)
+        packet_xmit = packet_direct_xmit;
 
     // init and fill buffer allocation instance
     if ((pBufAlloc_l = bufalloc_init(EDRV_MAX_TX_BUFFERS)) == NULL)
@@ -337,16 +346,18 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
             return kErrorEdrvNoFreeTxDesc;
         }
 
-        BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
-                 sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
-        skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
+
 
         // build a socket buffer
         skb_reserve(skb, TXBUF_HEADROOM);
         memcpy(skb_put(skb, pBuffer_p->txFrameSize), pBuffer_p->pBuffer, pBuffer_p->txFrameSize);
         skb->dev = edrvInstance_l.pSlave;
         skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
-        ret = dev_queue_xmit(skb);
+
+        BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
+                 sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
+        skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
+        ret = packet_xmit(skb); /* FIXME could this free the skb->data? */
 
         if (ret != NETDEV_TX_OK)
         {
@@ -369,6 +380,64 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     }
 
     return kErrorOk;
+}
+
+/* Taken out of net/packet/af_packet.c */
+static u16 __packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
+{
+	return (u16) raw_smp_processor_id() % dev->real_num_tx_queues;
+}
+
+static void packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
+{
+	const struct net_device_ops *ops = dev->netdev_ops;
+	u16 queue_index;
+
+	if (ops->ndo_select_queue) {
+		queue_index = ops->ndo_select_queue(dev, skb, NULL,
+						    __packet_pick_tx_queue);
+		queue_index = netdev_cap_txqueue(dev, queue_index);
+	} else {
+		queue_index = __packet_pick_tx_queue(dev, skb);
+	}
+
+	skb_set_queue_mapping(skb, queue_index);
+}
+static int packet_direct_xmit(struct sk_buff *skb)
+{
+	struct net_device *dev = skb->dev;
+	struct sk_buff *orig_skb = skb;
+	struct netdev_queue *txq;
+	int ret = NETDEV_TX_BUSY;
+
+	if (unlikely(!netif_running(dev) ||
+		     !netif_carrier_ok(dev)))
+		goto drop;
+
+	skb = validate_xmit_skb_list(skb, dev);
+	if (skb != orig_skb)
+		goto drop;
+
+	packet_pick_tx_queue(dev, skb);
+	txq = skb_get_tx_queue(dev, skb);
+
+	local_bh_disable();
+
+	HARD_TX_LOCK(dev, txq, smp_processor_id());
+	if (!netif_xmit_frozen_or_drv_stopped(txq))
+		ret = netdev_start_xmit(skb, dev, txq, false);
+	HARD_TX_UNLOCK(dev, txq);
+
+	local_bh_enable();
+
+	if (!dev_xmit_complete(ret))
+		kfree_skb(skb);
+
+	return ret;
+drop:
+	atomic_long_inc(&dev->tx_dropped);
+	kfree_skb_list(skb);
+	return NET_XMIT_DROP;
 }
 
 //------------------------------------------------------------------------------

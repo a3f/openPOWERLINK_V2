@@ -78,6 +78,9 @@ static char *slave_interface; /* TODO */
 module_param(slave_interface, charp, 0);
 MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
+int qdisc_enabled = 1;
+module_param(qdisc_enabled, int, 0);
+MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled, 1 = enabled (default)");
 
 //------------------------------------------------------------------------------
 // global function prototypes
@@ -196,6 +199,13 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     {
         return kErrorEdrvInit;
     }
+
+    if (qdisc_enabled == 1) {
+        err = kernel_setsockopt(edrvInstance_l.pTxSocket, SOL_PACKET, PACKET_QDISC_BYPASS, (char*)&qdisc_enabled, sizeof qdisc_enabled);
+        if (err < 0)
+            DEBUG_LVL_EDRV_TRACE("%s() Couldn't configure PACKET_QDISC_BYPASS on Tx: reason %d\n", __func__, err);
+    }
+
 
     mutex_init(&edrvInstance_l.mutex);
 
