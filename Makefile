@@ -19,6 +19,11 @@ endef
 
 oplk: oplk_stack kernel_edrv demo_mn
 
+set_freq: bin/linux/$(ARCH)/demo_mn_console/mnobd.cdc
+	@perl -e 'open FH,"+<$<"; binmode(FH); seek(FH,92,0); print FH pack("S", 1000*<>)'
+get_freq: bin/linux/$(ARCH)/demo_mn_console/mnobd.cdc
+	@perl -e 'open FH,"$<"; binmode(FH); seek(FH,92,0); read FH, $$_, 2; printf "%gms\n", 0.001*unpack "S", $$_'
+
 unload: bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplksmsc95xxmn.ko || echo Nothing to unload
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplk82573mn.ko || echo Nothing to unload
