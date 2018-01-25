@@ -96,9 +96,9 @@ static char *slave_interface; /* TODO */
 module_param(slave_interface, charp, 0);
 MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
-int qdisc_enabled = 1;
+int qdisc_enabled = 0;
 module_param(qdisc_enabled, int, 0);
-MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled, 1 = enabled (default)");
+MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled (default), 1 = enabled");
 
 //------------------------------------------------------------------------------
 // global function prototypes

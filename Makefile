@@ -6,6 +6,9 @@ CMAKE     ?= cmake
 CCMAKE    ?= ccmake
 SLAVE_IF  ?= enp0s8
 ARCH      ?= x86_64
+QDISC     ?= 0
+
+MODOPTS   := slave_interface=$(SLAVE_IF) qdisc_enabled=$(QDISC) $(MODOPTS)
 
 .PHONY: oplk oplk_stack oplk_stack_release oplk_stack_debug pcp_edrv kernel_edrv demo_mn demo_cn pcap_stack kernel_stack test_rpi test_bridge select_drivers configure_demo_mn
 
@@ -28,17 +31,18 @@ test_rpi: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/op
 
 test_stock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplk82573mn.ko
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplk82573mn.ko || echo Nothing to unload
-	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplk82573mn.ko 
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplk82573mn.ko
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
 test_bridge: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_bridgemn.ko
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
-	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko slave_interface=$(SLAVE_IF)
+	sudo ifconfig $(SLAVE_IF) down
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko $(MODOPTS)
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
 test_rawsock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_rawsockmn.ko
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_rawsockmn.ko || echo Nothing to unload
-	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_rawsockmn.ko slave_interface=$(SLAVE_IF)
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_rawsockmn.ko $(MODOPTS)
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
 oplk_stack: oplk_stack_release oplk_stack_debug
