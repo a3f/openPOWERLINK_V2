@@ -83,6 +83,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define TXBUF_HEADROOM (NET_SKB_PAD + NET_IP_ALIGN)
 #define EDRV_MAX_SKB_DATA_SIZE (SKB_DATA_ALIGN(TXBUF_HEADROOM + EDRV_MAX_FRAME_SIZE) + \
                                 SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
+#define EDRV_TX_BUFFER_SIZE (EDRV_MAX_SKB_DATA_SIZE * EDRV_MAX_TX_BUFFERS)
 
 //------------------------------------------------------------------------------
 // const defines
@@ -124,6 +125,7 @@ typedef struct
 {
     tEdrvInitParam      initParam;                          ///< Init parameters
     BOOL                afTxBufUsed[EDRV_MAX_TX_BUFFERS];   ///< Array indicating the use of a specific TX buffer
+    UINT8*              pTxBuf;                             ///< Pointer to the TX buffer	
     struct net_device  *pSlave;
 } tEdrvInstance;
 
@@ -196,15 +198,18 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         return kErrorNoResource;
     }
 
+    // allocate tx-buffers (TODO we could use dma_alloc_coherent too...)	
+    edrvInstance_l.pTxBuf = kmalloc(EDRV_TX_BUFFER_SIZE, GFP_KERNEL); // FIXME use GFP_USER?	
+    if (edrvInstance_l.pTxBuf == NULL)	
+    {	
+        DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_TX_BUFFER_SIZE);	
+        return kErrorNoResource;	
+    }	
+	
     for (i = 0; i < EDRV_MAX_TX_BUFFERS; i++)
     {
         bufData.bufferNumber = i;
-        bufData.pBuffer = kmalloc(EDRV_MAX_SKB_DATA_SIZE, GFP_KERNEL); // FIXME use GFP_USER?
-        if (bufData.pBuffer == NULL)
-        {
-            DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_MAX_SKB_DATA_SIZE);
-            return kErrorNoResource;
-        }
+        bufData.pBuffer = edrvInstance_l.pTxBuf + (i * EDRV_MAX_SKB_DATA_SIZE);	
 
         bufalloc_addBuffer(pBufAlloc_l, &bufData);
     }
@@ -279,6 +284,7 @@ tOplkError edrv_exit(void)
     // Clear instance structure
     bufalloc_exit(pBufAlloc_l);
     pBufAlloc_l = NULL;
+    kfree(edrvInstance_l.pTxBuf);
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
     return kErrorOk;
@@ -358,7 +364,11 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
         BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
                  sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
         skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
-        ret = packet_xmit(skb); /* FIXME could this free the skb->data? */
+
+        skb->cloned = 1; /* Inform the network driver not to free the skb->data */
+      	atomic_inc(&(skb_shinfo(skb)->dataref));
+
+        ret = packet_xmit(skb);
 
         if (ret != NETDEV_TX_OK)
         {
