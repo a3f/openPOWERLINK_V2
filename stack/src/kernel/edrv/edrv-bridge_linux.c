@@ -357,7 +357,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
         // build a socket buffer
         skb_reserve(skb, TXBUF_HEADROOM);
-        memcpy(skb_put(skb, pBuffer_p->txFrameSize), pBuffer_p->pBuffer, pBuffer_p->txFrameSize);
+        skb_put(skb, pBuffer_p->txFrameSize);
         skb->dev = edrvInstance_l.pSlave;
         skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
 
