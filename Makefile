@@ -1,5 +1,7 @@
 # A Makefile to rules the $(CMAKE)Listses that rule the Makefiles that rule the Compiler drivers that rule the compiler pipeline
 
+-include local-testing.mk # to override some opts here
+
 BUILD_TYPE = Debug
 DEBUG_LVL ?= 0xC0000000L # only warnings/errors
 CMAKE     ?= cmake
