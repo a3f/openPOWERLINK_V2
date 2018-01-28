@@ -60,6 +60,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <asm/system.h>
 
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
@@ -97,6 +98,10 @@ static char *slave_interface; /* TODO */
 module_param(slave_interface, charp, 0);
 MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
+/*  __dev_queue_xmit says When calling this method, interrupts MUST be enabled.
+ *  So we don't really have any choice... FIXME
+ *  Replace with a use_netpoll option?
+ */
 int qdisc_enabled = 0;
 module_param(qdisc_enabled, int, 0);
 MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled (default), 1 = enabled");
@@ -643,7 +648,18 @@ static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
 
     if (edrvInstance_l.initParam.pfnRxHandler != NULL)
     {
+        unsigned long flags;
+        /* We're running in softirq context. If we enter the stack through the Rx handler,
+         * claim the lock and get preempted by the timer ISR, which also tries to enter
+         * the stack for cyclic Tx, we will deadlock. Therefore disable IRQs.
+         * TODO can't we just do disable/enable?
+         * TODO couldn't we just mask the timer IRQ?
+         * TODO couldn't we just replace the locking with one that disables interrupts?
+         *      pros/cons? Look where locking happens and decide
+         */
+        local_irq_save(flags);
         pInstance->initParam.pfnRxHandler(&rxBuffer);
+        local_irq_restore(flags);
     }
 
 out:
