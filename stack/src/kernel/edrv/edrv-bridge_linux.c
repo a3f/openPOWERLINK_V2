@@ -16,31 +16,16 @@ interface, which is then used exclusively for openPOWERLINK communication.
 
 /*------------------------------------------------------------------------------
 Copyright (c) 2017, Ahmad Fatoum <ahmad[AT]a3f.at>
-Copyright (c) 2016, Bernecker+Rainer Industrie-Elektronik Ges.m.b.H. (B&R)
-Copyright (c) 2013, Kalycito Infotech Private Limited
-All rights reserved.
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-    * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-      notice, this list of conditions and the following disclaimer in the
-      documentation and/or other materials provided with the distribution.
-    * Neither the name of the copyright holders nor the
-      names of its contributors may be used to endorse or promote products
-      derived from this software without specific prior written permission.
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License version 2 as included in
+the Linux' kernel's top level COPYING file, available at
+https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/COPYING
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL COPYRIGHT HOLDERS BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
 ------------------------------------------------------------------------------*/
 
 //------------------------------------------------------------------------------
@@ -48,7 +33,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //------------------------------------------------------------------------------
 #include <common/oplkinc.h>
 #include <common/ftracedebug.h>
-#include <common/bufalloc.h>
 #include <kernel/edrv.h>
 
 #include <linux/module.h>
@@ -77,14 +61,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define TRACE printk
 #endif
 
-#ifndef EDRV_MAX_TX_BUFFERS
-#define EDRV_MAX_TX_BUFFERS      256             // Max no of Buffers
-#endif
+#define EDRV_TAILROOM           SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE     0x0600
-#define TXBUF_HEADROOM (NET_SKB_PAD + NET_IP_ALIGN)
-#define EDRV_MAX_SKB_DATA_SIZE (SKB_DATA_ALIGN(TXBUF_HEADROOM + EDRV_MAX_FRAME_SIZE) + \
-                                SKB_DATA_ALIGN(sizeof(struct skb_shared_info)))
-#define EDRV_TX_BUFFER_SIZE (EDRV_MAX_SKB_DATA_SIZE * EDRV_MAX_TX_BUFFERS)
 
 //------------------------------------------------------------------------------
 // const defines
@@ -129,8 +107,6 @@ This structure describes an instance of the Ethernet driver.
 typedef struct
 {
     tEdrvInitParam      initParam;                          ///< Init parameters
-    BOOL                afTxBufUsed[EDRV_MAX_TX_BUFFERS];   ///< Array indicating the use of a specific TX buffer
-    UINT8*              pTxBuf;                             ///< Pointer to the TX buffer	
     struct net_device  *pSlave;
 } tEdrvInstance;
 
@@ -138,17 +114,16 @@ typedef struct
 // local vars
 //------------------------------------------------------------------------------
 static tEdrvInstance edrvInstance_l;
-static tBufAlloc* pBufAlloc_l = NULL;
 static int (*packet_xmit)(struct sk_buff *skb) = dev_queue_xmit;
 
 //------------------------------------------------------------------------------
 // local function prototypes
 //------------------------------------------------------------------------------
 static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p);
+static void                txPacketHandler(struct sk_buff *pSkb_p);
 static int enslave(struct net_device *pSlaveDevice_p);
 static int emancipate(struct net_device *pSlaveDevice_p);
 static UINT8 getMacAdrs(UINT8* pMacAddr_p, struct net_device *pSlaveDevice_p, UINT8 size_p);
-static BOOL     getLinkStatus(struct net_device *pSlaveDevice_p);
 static int packet_direct_xmit(struct sk_buff *skb);
 
 
@@ -171,10 +146,8 @@ This function initializes the Ethernet driver.
 //------------------------------------------------------------------------------
 tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 {
-    int i;
     tOplkError ret = kErrorEdrvInit;
     struct net_device *pSlaveDevice;
-    tBufData        bufData;
 
     // Check parameter validity
     ASSERT(pEdrvInitParam_p != NULL);
@@ -197,28 +170,6 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         packet_xmit = packet_direct_xmit;
 
     // init and fill buffer allocation instance
-    if ((pBufAlloc_l = bufalloc_init(EDRV_MAX_TX_BUFFERS)) == NULL)
-    {
-        DEBUG_LVL_ERROR_TRACE("%s() bufalloc_init failed\n", __func__);
-        return kErrorNoResource;
-    }
-
-    // allocate tx-buffers (TODO we could use dma_alloc_coherent too...)	
-    edrvInstance_l.pTxBuf = kmalloc(EDRV_TX_BUFFER_SIZE, GFP_KERNEL); // FIXME use GFP_USER?	
-    if (edrvInstance_l.pTxBuf == NULL)	
-    {	
-        DEBUG_LVL_ERROR_TRACE("%s() kmalloc for %u bytes failed\n", __func__, EDRV_TX_BUFFER_SIZE);	
-        return kErrorNoResource;	
-    }	
-	
-    for (i = 0; i < EDRV_MAX_TX_BUFFERS; i++)
-    {
-        bufData.bufferNumber = i;
-        bufData.pBuffer = edrvInstance_l.pTxBuf + (i * EDRV_MAX_SKB_DATA_SIZE);	
-
-        bufalloc_addBuffer(pBufAlloc_l, &bufData);
-    }
-
     rtnl_lock();
 
     pSlaveDevice = __dev_get_by_name(current->nsproxy->net_ns, slave_interface);
@@ -287,9 +238,6 @@ tOplkError edrv_exit(void)
     rtnl_unlock();
 
     // Clear instance structure
-    bufalloc_exit(pBufAlloc_l);
-    pBufAlloc_l = NULL;
-    kfree(edrvInstance_l.pTxBuf);
     OPLK_MEMSET(&edrvInstance_l, 0, sizeof(edrvInstance_l));
 
     return kErrorOk;
@@ -321,9 +269,7 @@ This function sends the Tx buffer.
 
 \return The function returns a tOplkError error code.
 
-\bug XXX Now that I am calling the Tx handler in here, is this function supposed
-         to be reentrant?
-\note    This is called in interrupt context
+\NOTE    This is called in hardirq context
 
 \ingroup module_edrv
 */
@@ -338,61 +284,40 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     bufferNumber = pBuffer_p->txBufferNumber.value;
 
-    BUG_ON(pBuffer_p->is_lock_protected); /* XXX we aren't reentrant */
+    /* XXX From edrv-pcap_linux.c:
+     * "We pretend that packet is sent and immediately call
+     * tx handler! Otherwise the stack would hang!"
+     * But the other edrvs have no special handling for that...
+     * If handling is needed, you may use netif_carrier_ok(pSlaveDevice_p)
+     */
 
-    if (pBuffer_p->txBufferNumber.value >= EDRV_MAX_TX_BUFFERS ||
-        edrvInstance_l.afTxBufUsed[bufferNumber] == FALSE)
+    /* build a socket buffer */
+    struct sk_buff *skb;
+    skb = build_skb(pBuffer_p->pBuffer, 0);
+    if (!skb) {
+        DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
+        return kErrorEdrvNoFreeTxDesc;
+    }
+
+    // build a socket buffer
+    skb_put(skb, pBuffer_p->txFrameSize);
+    skb->dev = edrvInstance_l.pSlave;
+    skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
+
+    BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
+            sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
+    skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
+
+    skb_shinfo(skb)->destructor_arg = pBuffer_p;
+    skb->destructor = txPacketHandler;
+
+    ret = packet_xmit(skb);
+
+    if (ret != NETDEV_TX_OK)
     {
+        DEBUG_LVL_ERROR_TRACE("%s() dev_queue_xmit returned %d\n",
+                __func__, ret);
         return kErrorInvalidOperation;
-    }
-
-    /* FIXME this could be optimized by using netdev notification listener. Is that worth it? */
-    if (getLinkStatus(edrvInstance_l.pSlave))
-    {
-        /* build a socket buffer */
-        struct sk_buff *skb;
-        skb = build_skb(pBuffer_p->pBuffer - TXBUF_HEADROOM, 0);
-        if (!skb) {
-            DEBUG_LVL_ERROR_TRACE("%s() build_skb returned %d\n",
-                                __func__, PTR_ERR(skb));
-            return kErrorEdrvNoFreeTxDesc;
-        }
-
-
-
-        // build a socket buffer
-        skb_reserve(skb, TXBUF_HEADROOM);
-        skb_put(skb, pBuffer_p->txFrameSize);
-        skb->dev = edrvInstance_l.pSlave;
-        skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
-
-        BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
-                 sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
-        skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
-
-        skb->cloned = 1; /* Inform the network driver not to free the skb->data */
-      	atomic_inc(&(skb_shinfo(skb)->dataref));
-
-        ret = packet_xmit(skb);
-
-        if (ret != NETDEV_TX_OK)
-        {
-            DEBUG_LVL_ERROR_TRACE("%s() dev_queue_xmit returned %d\n",
-                                 __func__, ret);
-            return kErrorInvalidOperation;
-        }
-    } else {
-        /* there's no link! We pretend that packet is sent and immediately call
-         * tx handler! Otherwise the stack would hang! */
-        DEBUG_LVL_EDRV_TRACE("%s() slave link is down!\n", __func__);
-    }
-
-    /* FIXME: _actual_ transmission confirmation? e.g. via timestaping */
-    if (pBuffer_p->pfnTxHandler != NULL)
-    {
-        pBuffer_p->is_lock_protected = TRUE;
-        pBuffer_p->pfnTxHandler(pBuffer_p);
-        pBuffer_p->is_lock_protected = FALSE;
     }
 
     return kErrorOk;
@@ -471,34 +396,23 @@ This function allocates a Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    tOplkError          ret = kErrorOk;
-    tBufData            bufData;
-
+    void *buf;
+    
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
-    if (pBuffer_p->maxBufferSize > EDRV_MAX_FRAME_SIZE)
-    {
-        ret = kErrorEdrvNoFreeBufEntry;
-        goto Exit;
-    }
+    /* FIXME check the function is never called with interrupts disabled */
+    /* TODO Maybe we should check that we don't have an ISA device or something
+     * else with quirky DMA range limitations?
+     */
+    buf = kmalloc(EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
+    if (!buf)
+        return kErrorEdrvNoFreeTxDesc;
 
-    // get a free Tx buffer from the allocation instance
-    ret = bufalloc_getBuffer(pBufAlloc_l, &bufData);
-    if (ret != kErrorOk)
-    {
-        ret = kErrorEdrvNoFreeBufEntry;
-        goto Exit;
-    }
-
-    pBuffer_p->pBuffer = bufData.pBuffer + TXBUF_HEADROOM;
-    pBuffer_p->txBufferNumber.value = bufData.bufferNumber;
+    pBuffer_p->pBuffer = buf;
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
-    pBuffer_p->is_lock_protected = FALSE;
-    edrvInstance_l.afTxBufUsed[bufData.bufferNumber] = TRUE;
 
-Exit:
-    return ret;
+    return kErrorOk;
 }
 
 //------------------------------------------------------------------------------
@@ -516,19 +430,9 @@ This function releases the Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    tOplkError  ret;
-    tBufData    bufData;
-
-    // Check parameter validity
     ASSERT(pBuffer_p != NULL);
-
-    bufData.pBuffer = pBuffer_p->pBuffer - TXBUF_HEADROOM;
-    bufData.bufferNumber = pBuffer_p->txBufferNumber.value;
-
-    edrvInstance_l.afTxBufUsed[pBuffer_p->txBufferNumber.value] = FALSE;
-    ret = bufalloc_releaseBuffer(pBufAlloc_l, &bufData);
-
-    return ret;
+    kfree(pBuffer_p->pBuffer);
+    return kErrorOk;
 }
 
 //------------------------------------------------------------------------------
@@ -621,9 +525,7 @@ tOplkError edrv_setRxMulticastMacAddr(const UINT8* pMacAddr_p)
 
 This function is the packet handler forwarding the frames to the dllk.
 
-\param[in,out]  pParam_p            User specific pointer pointing to the instance structure
-\param[in]      pHeader_p           Packet header information (e.g. size)
-\param[in]      pPktData_p          Packet buffer
+\param[in,out]  pSkb_p            Socket Buffer with received packet
 */
 //------------------------------------------------------------------------------
 static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
@@ -669,6 +571,34 @@ out:
 
 //------------------------------------------------------------------------------
 /**
+\brief  Edrv tranmission completion handler
+
+This function is called as destructor of the socket buffer passed to the driver.
+This signals that the packet has been sent out and space can be reclaimed by DLL
+
+\NOTE XXX runs in NET_TX_SOFTIRQ or NAPI softirq context
+
+\param[in,out]  pSkb_p            Socket Buffer with reclaimable transmistted packet
+*/
+//------------------------------------------------------------------------------
+static void txPacketHandler(struct sk_buff *skb)
+{
+    tEdrvTxBuffer *pTxBuffer = skb_shinfo(skb)->destructor_arg;
+
+    if (pTxBuffer->pfnTxHandler != NULL)
+    {
+        unsigned long flags;
+        /* Necessary to avoid deadlock */
+        local_irq_save(flags);
+        pTxBuffer->pfnTxHandler(pTxBuffer);
+        local_irq_restore(flags);
+    }
+
+    skb->data = NULL; /* Don't reclaim our buffer */
+}
+
+//------------------------------------------------------------------------------
+/**
 \brief  Get Edrv MAC address
 
 This function gets the interface's MAC address. Call with rtnl_lock held
@@ -683,24 +613,6 @@ static UINT8 getMacAdrs(UINT8* pMacAddr_p, struct net_device *pSlaveDevice_p, UI
 
     OPLK_MEMCPY(pMacAddr_p, pSlaveDevice_p->dev_addr, size);
     return size;
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Get link status
-
-This function returns the interface link status.
-
-\param[in]      pSlaveDevice_p        Slave net_device
-
-\return The function returns the link status.
-\retval TRUE    The link is up.
-\retval FALSE   The link is down.
-*/
-//------------------------------------------------------------------------------
-static BOOL getLinkStatus(struct net_device * pSlaveDevice_p)
-{
-    return netif_carrier_ok(pSlaveDevice_p);
 }
 
 static int enslave(struct net_device *pSlaveDevice_p)

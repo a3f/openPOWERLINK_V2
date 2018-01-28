@@ -292,7 +292,10 @@ This function sends the Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    int         bytesSent;
+    int           bytesSent;
+    struct kvec   iov;
+    struct msghdr msg = {};
+
 
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
@@ -300,46 +303,36 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     if (pBuffer_p->txBufferNumber.pArg != NULL)
         return kErrorInvalidOperation;
 
-    if (getLinkStatus(edrvInstance_l.pDev) == FALSE)
+    /* XXX From edrv-pcap_linux.c:
+     * "We pretend that packet is sent and immediately call
+     * tx handler! Otherwise the stack would hang!"
+     * But the other edrvs have no special handling for that...
+     * If handling is needed, you may use netif_carrier_ok(pSlaveDevice_p)
+     * rcu_read_lock(); dev_get_flags(pDev_p) & IFF_RUNNING; rcu_read_unlock();
+     */
+    iov.iov_base = pBuffer_p->pBuffer;
+    iov.iov_len = pBuffer_p->txFrameSize;
+
+    mutex_lock(&edrvInstance_l.mutex);
+    if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
     {
-        /* there's no link! We pretend that packet is sent and immediately call
-         * tx handler! Otherwise the stack would hang! */
-        if (pBuffer_p->pfnTxHandler != NULL)
-        {
-            pBuffer_p->is_lock_protected = TRUE;
-            pBuffer_p->pfnTxHandler(pBuffer_p);
-            pBuffer_p->is_lock_protected = FALSE;
-        }
+        edrvInstance_l.pTransmittedTxBufferLastEntry =
+            edrvInstance_l.pTransmittedTxBufferFirstEntry = pBuffer_p;
     }
     else
     {
-        struct kvec iov;
-        struct msghdr msg = {};
+        edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer_p;
+        edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer_p;
+    }
+    mutex_unlock(&edrvInstance_l.mutex);
 
-        iov.iov_base = pBuffer_p->pBuffer;
-        iov.iov_len = pBuffer_p->txFrameSize;
+    bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, pBuffer_p->txFrameSize);
 
-        mutex_lock(&edrvInstance_l.mutex);
-        if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
-        {
-            edrvInstance_l.pTransmittedTxBufferLastEntry =
-                edrvInstance_l.pTransmittedTxBufferFirstEntry = pBuffer_p;
-        }
-        else
-        {
-            edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer_p;
-            edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer_p;
-        }
-        mutex_unlock(&edrvInstance_l.mutex);
-
-        bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, pBuffer_p->txFrameSize);
-
-        if (unlikely(bytesSent != pBuffer_p->txFrameSize))
-        {
-            DEBUG_LVL_EDRV_TRACE("%s() kernel_sendmsg returned %d instead of %zu\n",
-                                 __func__, bytesSent, pBuffer_p->txFrameSize);
-            return kErrorInvalidOperation;
-        }
+    if (unlikely(bytesSent != pBuffer_p->txFrameSize))
+    {
+        DEBUG_LVL_EDRV_TRACE("%s() kernel_sendmsg returned %d instead of %zu\n",
+                __func__, bytesSent, pBuffer_p->txFrameSize);
+        return kErrorInvalidOperation;
     }
 
     return kErrorOk;
@@ -719,37 +712,6 @@ static int getMacAdrs(struct net_device *pDev_p, UINT8* pMacAddr_p, int *pIfInde
 
     rcu_read_unlock();
     return err;
-}
-
-//------------------------------------------------------------------------------
-/**
-\brief  Get link status
-
-This function returns the interface link status.
-
-\param[in]      pIfName_p           Ethernet interface device name
-
-\return The function returns the link status.
-\retval TRUE    The link is up.
-\retval FALSE   The link is down.
-*/
-//------------------------------------------------------------------------------
-static BOOL getLinkStatus(struct net_device* pDev_p)
-{
-    BOOL fRunning;
-    rcu_read_lock();
-
-    if (dev_get_flags(pDev_p) & IFF_RUNNING)
-    {
-        fRunning = TRUE;
-    }
-    else
-    {
-        fRunning = FALSE;
-    }
-
-    rcu_read_unlock();
-    return fRunning;
 }
 
 /// \}
