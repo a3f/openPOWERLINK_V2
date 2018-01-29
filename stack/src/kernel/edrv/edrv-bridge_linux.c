@@ -44,6 +44,7 @@ GNU General Public License for more details.
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/netpoll.h>
 #include <asm/system.h>
 
 #include <linux/netdevice.h>
@@ -80,9 +81,17 @@ MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
  *  So we don't really have any choice... FIXME
  *  Replace with a use_netpoll option?
  */
-int qdisc_enabled = 0;
-module_param(qdisc_enabled, int, 0);
-MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled (default), 1 = enabled");
+static bool use_qdisc = false;
+module_param(use_qdisc, bool, 0);
+MODULE_PARM_DESC(use_qdisc, "Use Qdisc? 0 = no (default), 1 = yes");
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+static bool use_netpoll = true;
+MODULE_PARM_DESC(use_netpoll, "Use netpoll if possible? 0 = no, 1 = yes (default)");
+module_param(use_netpoll, bool, 0);
+#else
+static int use_netpoll = false;
+#endif
 
 //------------------------------------------------------------------------------
 // global function prototypes
@@ -108,13 +117,14 @@ typedef struct
 {
     tEdrvInitParam      initParam;                          ///< Init parameters
     struct net_device  *pSlave;
+    tOplkError        (*pfnXmit)(struct sk_buff *pSkb_p);
+    struct netpoll      np;
 } tEdrvInstance;
 
 //------------------------------------------------------------------------------
 // local vars
 //------------------------------------------------------------------------------
 static tEdrvInstance edrvInstance_l;
-static int (*packet_xmit)(struct sk_buff *skb) = dev_queue_xmit;
 
 //------------------------------------------------------------------------------
 // local function prototypes
@@ -124,7 +134,10 @@ static void                txPacketHandler(struct sk_buff *pSkb_p);
 static int enslave(struct net_device *pSlaveDevice_p);
 static int emancipate(struct net_device *pSlaveDevice_p);
 static UINT8 getMacAdrs(UINT8* pMacAddr_p, struct net_device *pSlaveDevice_p, UINT8 size_p);
-static int packet_direct_xmit(struct sk_buff *skb);
+static int        packet_direct_xmit(struct sk_buff *skb);
+static tOplkError packet_direct_xmit_in_softirq(struct sk_buff *skb);
+static tOplkError packet_queue_xmit_in_softirq(struct sk_buff *skb);
+static tOplkError packet_netpoll_xmit(struct sk_buff *skb);
 
 
 //============================================================================//
@@ -165,9 +178,6 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__);
         return kErrorEdrvInit;
     }
-
-    if (qdisc_enabled)
-        packet_xmit = packet_direct_xmit;
 
     // init and fill buffer allocation instance
     rtnl_lock();
@@ -211,6 +221,15 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
             goto unlock;
         }
     }
+
+#ifdef CONFIG_NET_POLL_CONTROLLER
+    if (!pSlaveDevice->netdev_ops->ndo_poll_controller)
+        use_netpoll = false;
+#endif
+
+    edrvInstance_l.pfnXmit = use_qdisc   ? packet_queue_xmit_in_softirq
+                           : use_netpoll ? packet_netpoll_xmit
+                           :               packet_direct_xmit_in_softirq;
 
     ret = kErrorOk;
 
@@ -276,7 +295,6 @@ This function sends the Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    netdev_tx_t     ret;
     UINT            bufferNumber;
 
     // Check parameter validity
@@ -311,16 +329,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     skb_shinfo(skb)->destructor_arg = pBuffer_p;
     skb->destructor = txPacketHandler;
 
-    ret = packet_xmit(skb);
-
-    if (ret != NETDEV_TX_OK)
-    {
-        DEBUG_LVL_ERROR_TRACE("%s() dev_queue_xmit returned %d\n",
-                __func__, ret);
-        return kErrorInvalidOperation;
-    }
-
-    return kErrorOk;
+    return edrvInstance_l.pfnXmit(skb);
 }
 
 /* Taken out of net/packet/af_packet.c */
@@ -380,6 +389,46 @@ drop:
 	kfree_skb_list(skb);
 	return NET_XMIT_DROP;
 }
+
+//------------------------------------------------------------------------------
+/**
+\brief  TODO
+
+dev_queue_xmit can't be used with interrupts disabled, so we offload it to a softirq
+This signals that the packet has been sent out and space can be reclaimed by DLL
+
+\NOTE runs in hardirq context
+
+\param[in,out]  pSkb_p            Socket Buffer with reclaimable transmistted packet
+*/
+//------------------------------------------------------------------------------
+static inline tOplkError __packet_xmit_in_softirq(int pfnXmit_p(struct sk_buff *),
+                                                  struct sk_buff *pSkb_p)
+{
+    netdev_tx_t ret = pfnXmit_p(pSkb_p); /* XXX FIXME offload to tasklet */
+
+    if (ret !=  NETDEV_TX_OK)
+    {
+        DEBUG_LVL_ERROR_TRACE("%s() xmit returned %d\n", __func__, ret);
+        return kErrorInvalidOperation;
+    }
+
+    return kErrorOk;
+}
+static tOplkError packet_queue_xmit_in_softirq(struct sk_buff *skb) {
+    return __packet_xmit_in_softirq(dev_queue_xmit, skb);
+}
+static tOplkError packet_direct_xmit_in_softirq(struct sk_buff *skb) {
+    return __packet_xmit_in_softirq(packet_direct_xmit, skb);
+}
+static tOplkError packet_netpoll_xmit(struct sk_buff *skb) {
+#ifdef CONFIG_NET_POLL_CONTROLLER
+    /* FIXME implement */
+#endif
+    return packet_direct_xmit(skb);
+}
+
+
 
 //------------------------------------------------------------------------------
 /**
