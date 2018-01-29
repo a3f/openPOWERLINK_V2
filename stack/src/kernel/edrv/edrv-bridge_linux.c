@@ -574,6 +574,8 @@ tOplkError edrv_setRxMulticastMacAddr(const UINT8* pMacAddr_p)
 
 This function is the packet handler forwarding the frames to the dllk.
 
+\NOTE function is called in softirq context
+
 \param[in,out]  pSkb_p            Socket Buffer with received packet
 */
 //------------------------------------------------------------------------------
@@ -598,19 +600,8 @@ static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
     rxBuffer.pBuffer = skb->data;
 
     if (edrvInstance_l.initParam.pfnRxHandler != NULL)
-    {
-        unsigned long flags;
-        /* We're running in softirq context. If we enter the stack through the Rx handler,
-         * claim the lock and get preempted by the timer ISR, which also tries to enter
-         * the stack for cyclic Tx, we will deadlock. Therefore disable IRQs.
-         * TODO can't we just do disable/enable?
-         * TODO couldn't we just mask the timer IRQ?
-         * TODO couldn't we just replace the locking with one that disables interrupts?
-         *      pros/cons? Look where locking happens and decide
-         */
-        local_irq_save(flags);
+    { // Rx handler disables hardirqs, so this is safe to call from softirq context
         pInstance->initParam.pfnRxHandler(&rxBuffer);
-        local_irq_restore(flags);
     }
 
 out:
@@ -635,12 +626,8 @@ static void txPacketHandler(struct sk_buff *skb)
     tEdrvTxBuffer *pTxBuffer = skb_shinfo(skb)->destructor_arg;
 
     if (pTxBuffer->pfnTxHandler != NULL)
-    {
-        unsigned long flags;
-        /* Necessary to avoid deadlock */
-        local_irq_save(flags);
+    { // Tx handler disables hardirqs, so this is safe to call from softirq context
         pTxBuffer->pfnTxHandler(pTxBuffer);
-        local_irq_restore(flags);
     }
 
     skb->data = NULL; /* Don't reclaim our buffer */

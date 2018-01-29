@@ -54,7 +54,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/nsproxy.h>
 #include <linux/if_ether.h>
 #include <uapi/linux/if.h>
-#include <linux/mutex.h>
+#include <linux/spinlock.h>
 #include <linux/kthread.h>
 #include <linux/err.h>
 #include <linux/uio.h>
@@ -112,7 +112,7 @@ typedef struct
     int                 ifIndex;                            ///< Interface index
     tEdrvTxBuffer*      pTransmittedTxBufferLastEntry;      ///< Pointer to the last entry of the transmitted TX buffer
     tEdrvTxBuffer*      pTransmittedTxBufferFirstEntry;     ///< Pointer to the first entry of the transmitted Tx buffer
-    struct mutex        mutex;                              ///< Mutex for locking of critical sections
+    spinlock_t          spinlock;
     struct completion   syncStart;                          ///< Completion for signaling the start of the worker thread
     struct socket*      pTxSocket;                          ///< Tx socket
     struct task_struct *pThread;                            ///< Handle of the worker thread
@@ -207,7 +207,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     }
 
 
-    mutex_init(&edrvInstance_l.mutex);
+    spin_lock_init(&edrvInstance_l.spinlock);
 
     init_completion(&edrvInstance_l.syncStart);
 
@@ -249,9 +249,6 @@ tOplkError edrv_exit(void)
 
     kernel_sock_shutdown(edrvInstance_l.pTxSocket, SHUT_RDWR);
     sock_release(edrvInstance_l.pTxSocket);
-
-    // Destroy the mutex
-    mutex_destroy(&edrvInstance_l.mutex);
 
     dev_put(edrvInstance_l.pDev);
 
@@ -295,6 +292,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     int           bytesSent;
     struct kvec   iov;
     struct msghdr msg = {};
+    unsigned long flags;
 
 
     // Check parameter validity
@@ -313,7 +311,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     iov.iov_base = pBuffer_p->pBuffer;
     iov.iov_len = pBuffer_p->txFrameSize;
 
-    mutex_lock(&edrvInstance_l.mutex);
+    spin_lock_irqsave(&edrvInstance_l.spinlock, flags);
     if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
     {
         edrvInstance_l.pTransmittedTxBufferLastEntry =
@@ -324,8 +322,11 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
         edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer_p;
         edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer_p;
     }
-    mutex_unlock(&edrvInstance_l.mutex);
+    spin_unlock_irqrestore(&edrvInstance_l.spinlock, flags);
 
+    /* XXX FIXME not safe to call from hardirq context
+     * XXX TODO  offload to softirq
+     */
     bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, pBuffer_p->txFrameSize);
 
     if (unlikely(bytesSent != pBuffer_p->txFrameSize))
@@ -504,7 +505,7 @@ static void packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataL
         rxBuffer.pBuffer = pPktData_p;
 
         if (edrvInstance_l.initParam.pfnRxHandler != NULL)
-        {
+        { // Rx handler disables hardirqs, so this is safe to call from process context
             pInstance->initParam.pfnRxHandler(&rxBuffer);
         }
     }
@@ -519,13 +520,14 @@ static void packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataL
             {
                 if (OPLK_MEMCMP(pPktData_p, pTxBuffer->pBuffer, 6) == 0)
                 {
-                    mutex_lock(&pInstance->mutex);
+                    unsigned long flags;
+                    spin_lock_irqsave(&pInstance->spinlock, flags);
                     pInstance->pTransmittedTxBufferFirstEntry = (tEdrvTxBuffer*)pInstance->pTransmittedTxBufferFirstEntry->txBufferNumber.pArg;
                     if (pInstance->pTransmittedTxBufferFirstEntry == NULL)
                     {
                         pInstance->pTransmittedTxBufferLastEntry = NULL;
                     }
-                    mutex_unlock(&pInstance->mutex);
+                    spin_unlock_irqrestore(&pInstance->spinlock, flags);
 
                     pTxBuffer->txBufferNumber.pArg = NULL;
 
