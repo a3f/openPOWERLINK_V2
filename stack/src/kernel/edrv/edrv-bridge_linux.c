@@ -45,7 +45,6 @@ GNU General Public License for more details.
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/netpoll.h>
-#include <asm/system.h>
 
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
@@ -251,7 +250,6 @@ This function shuts down the Ethernet driver.
 //------------------------------------------------------------------------------
 tOplkError edrv_exit(void)
 {
-    // End the pcap loop and wait for the worker thread to terminate
     rtnl_lock();
     emancipate(edrvInstance_l.pSlave);
     rtnl_unlock();
@@ -296,6 +294,7 @@ This function sends the Tx buffer.
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     UINT            bufferNumber;
+    struct sk_buff *skb;
 
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
@@ -306,11 +305,13 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
      * "We pretend that packet is sent and immediately call
      * tx handler! Otherwise the stack would hang!"
      * But the other edrvs have no special handling for that...
+     * XXX They don't need it, because sending with link down will fail,
+     *     and indicated via tx error interrupt, there they call the tx handler
+     *
      * If handling is needed, you may use netif_carrier_ok(pSlaveDevice_p)
      */
 
     /* build a socket buffer */
-    struct sk_buff *skb;
     skb = build_skb(pBuffer_p->pBuffer, 0);
     if (!skb) {
         DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
@@ -445,20 +446,18 @@ This function allocates a Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    void *buf;
-    
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
-    /* FIXME check the function is never called with interrupts disabled */
+    BUG_ON(irqs_disabled());
     /* TODO Maybe we should check that we don't have an ISA device or something
      * else with quirky DMA range limitations?
+     * We could use edrvInstance_l.pSlave->dev for that...
      */
-    buf = kmalloc(EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
-    if (!buf)
+    pBuffer_p->pBuffer = kzalloc(EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
+    if (!pBuffer_p->pBuffer)
         return kErrorEdrvNoFreeTxDesc;
 
-    pBuffer_p->pBuffer = buf;
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
 
     return kErrorOk;

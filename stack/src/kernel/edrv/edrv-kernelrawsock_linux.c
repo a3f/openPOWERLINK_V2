@@ -78,9 +78,9 @@ static char *slave_interface; /* TODO */
 module_param(slave_interface, charp, 0);
 MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
-int qdisc_enabled = 1;
-module_param(qdisc_enabled, int, 0);
-MODULE_PARM_DESC(qdisc_enabled, "Qdisc, 0 = disabled, 1 = enabled (default)");
+int use_qdisc = 1;
+module_param(use_qdisc, int, 0);
+MODULE_PARM_DESC(use_qdisc, "Qdisc, 0 = disabled, 1 = enabled (default)");
 
 //------------------------------------------------------------------------------
 // global function prototypes
@@ -108,16 +108,25 @@ This structure describes an instance of the Ethernet driver.
 */
 typedef struct
 {
-    tEdrvInitParam      initParam;                          ///< Init parameters
-    int                 ifIndex;                            ///< Interface index
-    tEdrvTxBuffer*      pTransmittedTxBufferLastEntry;      ///< Pointer to the last entry of the transmitted TX buffer
-    tEdrvTxBuffer*      pTransmittedTxBufferFirstEntry;     ///< Pointer to the first entry of the transmitted Tx buffer
-    spinlock_t          spinlock;
-    struct completion   syncStart;                          ///< Completion for signaling the start of the worker thread
-    struct socket*      pTxSocket;                          ///< Tx socket
-    struct task_struct *pThread;                            ///< Handle of the worker thread
-    struct net_device  *pDev;                            ///< Handle of the worker thread
+    tEdrvInitParam         initParam;                          ///< Init parameters
+    int                    ifIndex;                            ///< Interface index
+    tEdrvTxBuffer*         pTransmittedTxBufferLastEntry;      ///< Pointer to the last entry of the transmitted TX buffer
+    tEdrvTxBuffer*         pTransmittedTxBufferFirstEntry;     ///< Pointer to the first entry of the transmitted Tx buffer
+    spinlock_t             spinlock;
+    struct completion      syncStart;                          ///< Completion for signaling the start of the worker thread
+    struct socket*         pTxSocket;                          ///< Tx socket
+    struct list_head       txList;                             ///< Tx's to be process in softirq
+    struct task_struct    *pRxThread;                          ///< Handle of the Rx worker thread
+    struct tasklet_struct  txTasklet;                          ///< Handle of the Tx Tasklet
+    struct net_device  *pDev;                                  ///< Handle of the worker thread
 } tEdrvInstance;
+
+typedef struct {
+    UINT8 data[EDRV_MAX_FRAME_SIZE];
+    tEdrvTxBuffer    *pEdrvTxBuffer;
+
+    struct list_head  txBufferList;
+} tTxBuffer;
 
 //------------------------------------------------------------------------------
 // local vars
@@ -132,6 +141,7 @@ static int            workerThread(void* pArgument_p);
 static int            getMacAdrs(struct net_device *pDev_p, UINT8* pMacAddr_p, int *pIfIndex_p);
 static struct socket *startSocket(int ifIndex_p);
 static BOOL           getLinkStatus(struct net_device *pDev_p);
+static void           sendTxBuffer_in_softirq(unsigned long flag);
 
 //============================================================================//
 //            P U B L I C   F U N C T I O N S                                 //
@@ -194,14 +204,17 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         }
     }
 
+    INIT_LIST_HEAD(&edrvInstance_l.txList);
+    tasklet_init(&edrvInstance_l.txTasklet, sendTxBuffer_in_softirq, 0L);
+
     edrvInstance_l.pTxSocket = startSocket(edrvInstance_l.ifIndex);
     if (edrvInstance_l.pTxSocket == NULL)
     {
         return kErrorEdrvInit;
     }
 
-    if (qdisc_enabled == 1) {
-        err = kernel_setsockopt(edrvInstance_l.pTxSocket, SOL_PACKET, PACKET_QDISC_BYPASS, (char*)&qdisc_enabled, sizeof qdisc_enabled);
+    if (use_qdisc) {
+        err = kernel_setsockopt(edrvInstance_l.pTxSocket, SOL_PACKET, PACKET_QDISC_BYPASS, (char*)&use_qdisc, sizeof use_qdisc);
         if (err < 0)
             DEBUG_LVL_EDRV_TRACE("%s() Couldn't configure PACKET_QDISC_BYPASS on Tx: reason %d\n", __func__, err);
     }
@@ -211,7 +224,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
     init_completion(&edrvInstance_l.syncStart);
 
-    if (IS_ERR(edrvInstance_l.pThread = kthread_run(workerThread, &edrvInstance_l, "oplk-edrvrawsock")))
+    if (IS_ERR(edrvInstance_l.pRxThread = kthread_run(workerThread, &edrvInstance_l, "oplk-edrvrawsock")))
     {
         DEBUG_LVL_ERROR_TRACE("%s() Couldn't create worker thread!\n", __func__);
         return kErrorEdrvInit;
@@ -245,10 +258,12 @@ This function shuts down the Ethernet driver.
 tOplkError edrv_exit(void)
 {
     // End the packet capture loop and wait for the worker thread to terminate
-    kthread_stop(edrvInstance_l.pThread);
+    kthread_stop(edrvInstance_l.pRxThread);
 
     kernel_sock_shutdown(edrvInstance_l.pTxSocket, SHUT_RDWR);
     sock_release(edrvInstance_l.pTxSocket);
+
+    tasklet_kill(&edrvInstance_l.txTasklet);
 
     dev_put(edrvInstance_l.pDev);
 
@@ -289,54 +304,81 @@ This function sends the Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    int           bytesSent;
-    struct kvec   iov;
-    struct msghdr msg = {};
-    unsigned long flags;
-
-
+    tTxBuffer *node;
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
     if (pBuffer_p->txBufferNumber.pArg != NULL)
         return kErrorInvalidOperation;
 
-    /* XXX From edrv-pcap_linux.c:
-     * "We pretend that packet is sent and immediately call
-     * tx handler! Otherwise the stack would hang!"
-     * But the other edrvs have no special handling for that...
-     * If handling is needed, you may use netif_carrier_ok(pSlaveDevice_p)
-     * rcu_read_lock(); dev_get_flags(pDev_p) & IFF_RUNNING; rcu_read_unlock();
+    node = container_of(&pBuffer_p->pBuffer[0], tTxBuffer, data[0]);
+
+    /* Process in bottom half, where we run with irqs enabled
+     * TODO Can kernel_sendmsg sleep? if so, we need to change this
+     *      after the panic
      */
-    iov.iov_base = pBuffer_p->pBuffer;
-    iov.iov_len = pBuffer_p->txFrameSize;
-
-    spin_lock_irqsave(&edrvInstance_l.spinlock, flags);
-    if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
-    {
-        edrvInstance_l.pTransmittedTxBufferLastEntry =
-            edrvInstance_l.pTransmittedTxBufferFirstEntry = pBuffer_p;
-    }
-    else
-    {
-        edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer_p;
-        edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer_p;
-    }
-    spin_unlock_irqrestore(&edrvInstance_l.spinlock, flags);
-
-    /* XXX FIXME not safe to call from hardirq context
-     * XXX TODO  offload to softirq
-     */
-    bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, pBuffer_p->txFrameSize);
-
-    if (unlikely(bytesSent != pBuffer_p->txFrameSize))
-    {
-        DEBUG_LVL_EDRV_TRACE("%s() kernel_sendmsg returned %d instead of %zu\n",
-                __func__, bytesSent, pBuffer_p->txFrameSize);
-        return kErrorInvalidOperation;
-    }
-
+    list_add_tail(&node->txBufferList, &edrvInstance_l.txList);
+    tasklet_hi_schedule(&edrvInstance_l.txTasklet);
     return kErrorOk;
+}
+static void sendTxBuffer_in_softirq(unsigned long arg)
+{
+    LIST_HEAD(list);
+    struct list_head *elem;
+    BOOL fRunning = getLinkStatus(edrvInstance_l.pDev);
+
+    (void)arg;
+
+    local_irq_disable();
+    list_splice_init(&edrvInstance_l.txList, &list);
+    local_irq_enable();
+
+    list_for_each(elem, &list)
+    {
+        tEdrvTxBuffer *pBuffer = container_of(&edrvInstance_l.txList, tTxBuffer, txBufferList)->pEdrvTxBuffer;
+
+        if (fRunning)
+        {
+            /* there's no link! We pretend that packet is sent and immediately call
+             * tx handler! Otherwise the stack would hang! */
+            if (pBuffer->pfnTxHandler != NULL)
+            {
+                pBuffer->pfnTxHandler(pBuffer);
+            }
+        }
+        else
+        {
+            struct kvec   iov;
+            unsigned long flags;
+            struct msghdr msg = {};
+            int           bytesSent;
+
+            iov.iov_base = pBuffer->pBuffer;
+            iov.iov_len = pBuffer->txFrameSize;
+
+            spin_lock_irqsave(&edrvInstance_l.spinlock, flags);
+            if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
+            {
+                edrvInstance_l.pTransmittedTxBufferLastEntry =
+                    edrvInstance_l.pTransmittedTxBufferFirstEntry = pBuffer;
+            }
+            else
+            {
+                edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer;
+                edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer;
+            }
+            spin_unlock_irqrestore(&edrvInstance_l.spinlock, flags);
+
+            bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, pBuffer->txFrameSize);
+
+            if (unlikely(bytesSent != pBuffer->txFrameSize))
+            {
+                DEBUG_LVL_EDRV_TRACE("%s() kernel_sendmsg returned %d instead of %zu\n",
+                        __func__, bytesSent, pBuffer->txFrameSize);
+            }
+
+        }
+    }
 }
 
 //------------------------------------------------------------------------------
@@ -354,6 +396,7 @@ This function allocates a Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
+    tTxBuffer *pTxB;
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
@@ -361,10 +404,14 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
         return kErrorEdrvNoFreeBufEntry;
 
     // allocate buffer with malloc
-    pBuffer_p->pBuffer = (UINT8*)OPLK_MALLOC(pBuffer_p->maxBufferSize);
-    if (pBuffer_p->pBuffer == NULL)
+    pTxB = kzalloc(sizeof *pTxB, GFP_KERNEL);
+    if (pTxB == NULL)
         return kErrorEdrvNoFreeBufEntry;
 
+    pTxB->pEdrvTxBuffer = pBuffer_p;
+    INIT_LIST_HEAD(&pTxB->txBufferList);
+    pBuffer_p->pBuffer = pTxB->data;
+    pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
     pBuffer_p->txBufferNumber.pArg = NULL;
 
     return kErrorOk;
@@ -714,6 +761,34 @@ static int getMacAdrs(struct net_device *pDev_p, UINT8* pMacAddr_p, int *pIfInde
 
     rcu_read_unlock();
     return err;
+}
+
+//------------------------------------------------------------------------------
+/**
+\brief  Get link status
+This function returns the interface link status.
+\param[in]      pIfName_p           Ethernet interface device name
+\return The function returns the link status.
+\retval TRUE    The link is up.
+\retval FALSE   The link is down.
+*/
+//------------------------------------------------------------------------------
+static BOOL getLinkStatus(struct net_device* pDev_p)
+{
+    BOOL fRunning;
+    rcu_read_lock();
+
+    if (dev_get_flags(pDev_p) & IFF_RUNNING)
+    {
+        fRunning = TRUE;
+    }
+    else
+    {
+        fRunning = FALSE;
+    }
+
+    rcu_read_unlock();
+    return fRunning;
 }
 
 /// \}
