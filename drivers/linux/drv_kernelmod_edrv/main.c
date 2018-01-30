@@ -471,10 +471,12 @@ static int  powerlinkIoctl(struct inode* pInode_p,
     UNUSED_PARAMETER(pFile_p);
 
 
+#if 0
     DEBUG_LVL_ALWAYS_TRACE("PLK: + %s() (cmd=%d type=%d)...\n",
                            __func__,
                            _IOC_NR(cmd_p),
                            _IOC_TYPE(cmd_p));
+#endif
 
     // Add some checks for valid commands here
     switch (cmd_p)
