@@ -10,8 +10,9 @@ SLAVE_IF  ?= enp0s8
 ARCH      ?= x86_64
 QDISC     ?= 0
 NETPOLL   ?= 1
+BUILD_SKB ?= 0
 
-MODOPTS   := slave_interface=$(SLAVE_IF) use_qdisc=$(QDISC) use_netpoll=$(NETPOLL) $(MODOPTS)
+MODOPTS   := slave_interface=$(SLAVE_IF) use_qdisc=$(QDISC) use_netpoll=$(NETPOLL) use_build_skb=$(BUILD_SKB) $(MODOPTS)
 
 .PHONY: oplk oplk_stack oplk_stack_release oplk_stack_debug pcp_edrv kernel_edrv demo_mn demo_cn pcap_stack kernel_stack test_rpi test_bridge select_drivers configure_demo_mn
 

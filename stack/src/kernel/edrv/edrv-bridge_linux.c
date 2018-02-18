@@ -89,6 +89,11 @@ module_param(use_netpoll, bool, 0);
 static int use_netpoll = false;
 #endif
 
+static bool use_build_skb = false;
+module_param(use_build_skb, bool, 0);
+MODULE_PARM_DESC(use_build_skb, "Use build_skb? 0 = no (default), 1 = yes");
+
+
 //------------------------------------------------------------------------------
 // global function prototypes
 //------------------------------------------------------------------------------
@@ -313,6 +318,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     UINT            bufferNumber;
     struct sk_buff *skb;
+    void           *dst;
 
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
@@ -320,15 +326,21 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     bufferNumber = pBuffer_p->txBufferNumber.value;
 
     /* build a socket buffer */
-    skb = build_skb(pBuffer_p->pBuffer - EDRV_HEADROOM, 0);
+    if (use_build_skb)
+        skb = build_skb(pBuffer_p->pBuffer - EDRV_HEADROOM, 0);
+    else
+        skb = alloc_skb(pBuffer_p->txFrameSize, GFP_ATOMIC);
+
     if (!skb)
     {
         DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
         return kErrorEdrvNoFreeTxDesc;
     }
 
-    skb_reserve(skb, EDRV_HEADROOM);
-    skb_put(skb, pBuffer_p->txFrameSize);
+    if ( use_build_skb) skb_reserve(skb, EDRV_HEADROOM);
+    dst = skb_put(skb, pBuffer_p->txFrameSize);
+    if (!use_build_skb) memcpy(dst, pBuffer_p->pBuffer, pBuffer_p->txFrameSize);
+
     skb->dev = edrvInstance_l.pSlave;
     skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
 
