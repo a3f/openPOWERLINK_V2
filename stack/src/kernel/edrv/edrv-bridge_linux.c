@@ -65,6 +65,8 @@ GNU General Public License for more details.
 #define EDRV_TAILROOM        SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE  0x0600
 
+#define SEC_TO_NSEC              1000000000
+
 //------------------------------------------------------------------------------
 // const defines
 //------------------------------------------------------------------------------
@@ -847,6 +849,39 @@ static int emancipate(struct net_device *pSlaveDevice_p)
 
     return 0;
 }
+
+//------------------------------------------------------------------------------
+// Timer helper functions
+//------------------------------------------------------------------------------
+#if (EDRV_USE_TTTX != FALSE)
+#include <linux/ptp_clock_kernel.h>
+//------------------------------------------------------------------------------
+/**
+\brief  Retrieve current MAC time
+
+The function retrieves the current MAC time.
+
+\param[out]     pCurtime_p          Pointer to store the current MAC time.
+
+\return The function returns a tOplkError error code.
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_getMacTime(UINT64* pCurtime_p)
+{
+    struct ptp_clock_info *ptp /* get this somehow */;
+    struct timespec64 ts;
+
+    if (pCurtime_p == NULL)
+        return kErrorNoResource;
+
+    if (ptp->gettime64(ptp, &ts))
+        return kErrorNoResource;
+
+    *pCurtime_p = ts.tv_sec * SEC_TO_NSEC + ts.tv_nsec;
+    return kErrorOk;
+}
+#endif
+
 
 
 /// \}
