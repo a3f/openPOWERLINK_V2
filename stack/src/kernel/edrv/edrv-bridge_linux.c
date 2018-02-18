@@ -129,9 +129,8 @@ static void                txPacketHandler(struct sk_buff *pSkb_p);
 static int enslave(struct net_device *pSlaveDevice_p);
 static int emancipate(struct net_device *pSlaveDevice_p);
 static UINT8 getMacAdrs(UINT8* pMacAddr_p, struct net_device *pSlaveDevice_p, UINT8 size_p);
-static int        packet_direct_xmit(struct sk_buff *skb);
-static tOplkError packet_direct_xmit_in_softirq(struct sk_buff *skb);
-static tOplkError packet_queue_xmit_in_softirq(struct sk_buff *skb);
+static tOplkError packet_direct_xmit(struct sk_buff *skb);
+static tOplkError packet_queue_xmit(struct sk_buff *skb);
 static tOplkError packet_netpoll_xmit(struct sk_buff *skb);
 
 
@@ -237,9 +236,9 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     use_netpoll = true;
 #endif
 
-    edrvInstance_l.pfnXmit = use_qdisc   ? packet_queue_xmit_in_softirq
+    edrvInstance_l.pfnXmit = use_qdisc   ? packet_queue_xmit
                            : use_netpoll ? packet_netpoll_xmit
-                           :               packet_direct_xmit_in_softirq;
+                           :               packet_direct_xmit;
 
     DEBUG_LVL_ALWAYS_TRACE("edrv-bridge: %s mode will be used on %s\n",
             use_qdisc   ? "Qdisc" :
@@ -351,6 +350,7 @@ static u16 __packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
 	return (u16) raw_smp_processor_id() % dev->real_num_tx_queues;
 }
 
+// FIXME this might require rtnl_lock...
 static void packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
@@ -367,7 +367,7 @@ static void packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
 
 	skb_set_queue_mapping(skb, queue_index);
 }
-static int packet_direct_xmit(struct sk_buff *skb)
+static int __packet_direct_xmit(struct sk_buff *skb)
 {
 	struct net_device *dev = skb->dev;
 	struct sk_buff *orig_skb = skb;
@@ -406,20 +406,26 @@ drop:
 
 //------------------------------------------------------------------------------
 /**
-\brief  TODO
+\brief  TODO Would using a softirq be better in any way?
+        TODO this assumes that the function don't sleep!
 
-dev_queue_xmit can't be used with interrupts disabled, so we offload it to a softirq
-This signals that the packet has been sent out and space can be reclaimed by DLL
+dev_queue_xmit can't be used with interrupts disabled, so we first renable
+irqs.
 
 \NOTE runs in hardirq context
 
 \param[in,out]  pSkb_p            Socket Buffer with reclaimable transmistted packet
 */
 //------------------------------------------------------------------------------
-static inline tOplkError __packet_xmit_in_softirq(int pfnXmit_p(struct sk_buff *),
+static inline tOplkError __packet_xmit_irq_enabled(int pfnXmit_p(struct sk_buff *),
                                                   struct sk_buff *pSkb_p)
 {
-    netdev_tx_t ret = pfnXmit_p(pSkb_p); /* XXX FIXME offload to tasklet */
+    netdev_tx_t ret;
+    bool enable_irq = irqs_disabled();
+
+    if (enable_irq) local_irq_enable();
+    ret = pfnXmit_p(pSkb_p);
+    if (enable_irq) local_irq_disable();
 
     if (ret !=  NETDEV_TX_OK)
     {
@@ -429,13 +435,13 @@ static inline tOplkError __packet_xmit_in_softirq(int pfnXmit_p(struct sk_buff *
 
     return kErrorOk;
 }
-static tOplkError packet_queue_xmit_in_softirq(struct sk_buff *skb)
+static tOplkError packet_queue_xmit(struct sk_buff *skb)
 {
-    return __packet_xmit_in_softirq(dev_queue_xmit, skb);
+    return __packet_xmit_irq_enabled(dev_queue_xmit, skb);
 }
-static tOplkError packet_direct_xmit_in_softirq(struct sk_buff *skb)
+static tOplkError packet_direct_xmit(struct sk_buff *skb)
 {
-    return __packet_xmit_in_softirq(packet_direct_xmit, skb);
+    return __packet_xmit_irq_enabled(__packet_direct_xmit, skb);
 }
 static tOplkError packet_netpoll_xmit(struct sk_buff *skb)
 {
