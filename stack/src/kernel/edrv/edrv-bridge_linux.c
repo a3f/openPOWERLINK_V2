@@ -14,19 +14,10 @@ interface, which is then used exclusively for openPOWERLINK communication.
 \ingroup module_edrv
 *******************************************************************************/
 
-/*------------------------------------------------------------------------------
-Copyright (c) 2017, Ahmad Fatoum <ahmad[AT]a3f.at>
-
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License version 2 as included in
-the Linux' kernel's top level COPYING file, available at
-https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/plain/COPYING
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-------------------------------------------------------------------------------*/
+/*
+ * Copyright (c) 2017, Ahmad Fatoum <ahmad[AT]a3f.at>
+ * SPDX-License-Identifier: GPL-2.0
+ */
 
 //------------------------------------------------------------------------------
 // includes
