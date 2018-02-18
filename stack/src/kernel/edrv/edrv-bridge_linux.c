@@ -316,30 +316,30 @@ This function sends the Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    UINT            bufferNumber;
     struct sk_buff *skb;
     void           *dst;
 
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
-    bufferNumber = pBuffer_p->txBufferNumber.value;
-
     /* build a socket buffer */
     if (use_build_skb)
-        skb = build_skb(pBuffer_p->pBuffer - EDRV_HEADROOM, 0);
-    else
-        skb = alloc_skb(pBuffer_p->txFrameSize, GFP_ATOMIC);
-
-    if (!skb)
     {
-        DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
-        return kErrorEdrvNoFreeTxDesc;
+        skb = build_skb(pBuffer_p->pBuffer - EDRV_HEADROOM, 0);
+        if (!skb)
+        {
+            DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
+            return kErrorEdrvNoFreeTxDesc;
+        }
+        skb_reserve(skb, EDRV_HEADROOM);
+    }
+    else
+    {
+        skb = skb_shinfo(skb)->frag_list;
+        skb_shinfo(skb)->frag_list = NULL;
     }
 
-    if ( use_build_skb) skb_reserve(skb, EDRV_HEADROOM);
     dst = skb_put(skb, pBuffer_p->txFrameSize);
-    if (!use_build_skb) memcpy(dst, pBuffer_p->pBuffer, pBuffer_p->txFrameSize);
 
     skb->dev = edrvInstance_l.pSlave;
     skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
@@ -480,15 +480,35 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
     ASSERT(pBuffer_p != NULL);
 
     BUG_ON(irqs_disabled());
+    if (pBuffer_p->maxBufferSize > EDRV_MAX_FRAME_SIZE)
+        return kErrorEdrvNoFreeBufEntry;
+
     /* TODO Maybe we should check that we don't have an ISA device or something
      * else with quirky DMA range limitations?
      * We could use edrvInstance_l.pSlave->dev for that...
      */
-    pBuffer_p->pBuffer = kzalloc(EDRV_HEADROOM + EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
+
+    if (use_build_skb)
+    {
+        pBuffer_p->pBuffer = kzalloc(EDRV_HEADROOM + EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
+    }
+    else
+    {
+        struct sk_buff *skb;
+        pBuffer_p->pBuffer = NULL;
+        skb = alloc_skb(EDRV_MAX_FRAME_SIZE, GFP_KERNEL);
+        if (skb)
+        {
+            skb_shinfo(skb)->frag_list = skb;
+            pBuffer_p->pBuffer = skb->data;
+        }
+    }
+
     if (!pBuffer_p->pBuffer)
         return kErrorEdrvNoFreeTxDesc;
 
-    pBuffer_p->pBuffer += EDRV_HEADROOM;
+    if (use_build_skb)
+        pBuffer_p->pBuffer += EDRV_HEADROOM;
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
 
     return kErrorOk;
@@ -510,7 +530,8 @@ This function releases the Tx buffer.
 tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     ASSERT(pBuffer_p != NULL);
-    kfree(pBuffer_p->pBuffer - EDRV_HEADROOM);
+    if (use_build_skb)
+        kfree(pBuffer_p->pBuffer - EDRV_HEADROOM);
     return kErrorOk;
 }
 
