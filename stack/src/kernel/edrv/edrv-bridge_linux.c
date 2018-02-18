@@ -1,6 +1,6 @@
 /**
 ********************************************************************************
-\file   edrv-bond_linux.c
+\file   edrv-bridge_linux.c
 
 \brief  Implementation of Linux OPLK-conformant 'bridge' driver
 
@@ -84,7 +84,7 @@ static bool use_qdisc = false;
 module_param(use_qdisc, bool, 0);
 MODULE_PARM_DESC(use_qdisc, "Use Qdisc? 0 = no (default), 1 = yes");
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
+#ifdef CONFIG_NETPOLL
 static bool use_netpoll = true;
 MODULE_PARM_DESC(use_netpoll, "Use netpoll if possible? 0 = no, 1 = yes (default)");
 module_param(use_netpoll, bool, 0);
@@ -159,6 +159,7 @@ This function initializes the Ethernet driver.
 tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 {
     tOplkError ret = kErrorEdrvInit;
+    int err;
     struct net_device *pSlaveDevice;
 
     // Check parameter validity
@@ -173,7 +174,8 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     DEBUG_LVL_EDRV_TRACE("%s() starting up...\n", __func__);
 
     edrvInstance_l.initParam.hwParam.pDevName = slave_interface;
-    if (!slave_interface || !*slave_interface) {
+    if (!slave_interface || !*slave_interface)
+    {
         DEBUG_LVL_ERROR_TRACE("%s() wasn't supplied a slave interface as kernel module parameter\n", __func__);
         return kErrorEdrvInit;
     }
@@ -183,12 +185,14 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
     pSlaveDevice = __dev_get_by_name(current->nsproxy->net_ns, slave_interface);
 
-    if (!pSlaveDevice) {
+    if (!pSlaveDevice)
+    {
         DEBUG_LVL_ERROR_TRACE("%s() was supplied an invalid slave interface name: %s\n", __func__, pSlaveDevice->name);
         goto unlock;
     }
 
-    if (enslave(pSlaveDevice) != 0) {
+    if (enslave(pSlaveDevice) != 0)
+    {
         goto unlock;
     }
 
@@ -197,14 +201,14 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
      */
     if (!is_zero_ether_addr(edrvInstance_l.initParam.aMacAddr))
     {   // write MAC address to controller
-        int res;
         struct sockaddr addr;
         memcpy(addr.sa_data, edrvInstance_l.initParam.aMacAddr, ETH_ALEN);
         addr.sa_family = pSlaveDevice->type;
-        res = dev_set_mac_address(pSlaveDevice, &addr);
-        if (res) {
+        err = dev_set_mac_address(pSlaveDevice, &addr);
+        if (err)
+        {
             DEBUG_LVL_ERROR_TRACE("%s() Error %d setting mac address to %pM\n",
-                    __func__, res, edrvInstance_l.initParam.aMacAddr);
+                    __func__, err, edrvInstance_l.initParam.aMacAddr);
             goto unlock;
         }
         DEBUG_LVL_EDRV_TRACE("%s() %s's MAC address was set to %pM\n", __func__, pSlaveDevice->name, edrvInstance_l.initParam.aMacAddr);
@@ -212,18 +216,29 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     else
     {   // read MAC address from controller
         UINT8 bytes = getMacAdrs(edrvInstance_l.initParam.aMacAddr, pSlaveDevice, ETH_ALEN);
-        if (bytes == 0) { /* generate a new mac address */
+        if (bytes == 0)
+        { /* generate a new mac address */
             eth_hw_addr_random(pSlaveDevice);
             DEBUG_LVL_EDRV_TRACE("%s() Generating random hardware address for %s\n", __func__, pSlaveDevice->name);
-        } else if (bytes != ETH_ALEN) {
+        }
+        else if (bytes != ETH_ALEN)
+        {
             DEBUG_LVL_ERROR_TRACE("%s() %s doesn't have a 6 byte hardware address\n", __func__, pSlaveDevice->name);
             goto unlock;
         }
     }
 
-#ifdef CONFIG_NET_POLL_CONTROLLER
-    if (!pSlaveDevice->netdev_ops->ndo_poll_controller)
-        use_netpoll = false;
+#ifdef CONFIG_NETPOLL
+    edrvInstance_l.np.name = "oplk-edrv-bridge";
+    strlcpy(edrvInstance_l.np.dev_name, slave_interface, IFNAMSIZ);
+    err = __netpoll_setup(&edrvInstance_l.np, pSlaveDevice);
+    if (err < 0)
+    {
+        DEBUG_LVL_ERROR_TRACE("%s() Failed to setup netpoll for %s: error %d\n", pSlaveDevice, err);
+        edrvInstance_l.np.dev = NULL;
+        goto unlock;
+    }
+    use_netpoll = true;
 #endif
 
     edrvInstance_l.pfnXmit = use_qdisc   ? packet_queue_xmit_in_softirq
@@ -250,6 +265,10 @@ This function shuts down the Ethernet driver.
 //------------------------------------------------------------------------------
 tOplkError edrv_exit(void)
 {
+    if (edrvInstance_l.np.dev)
+    {
+        netpoll_cleanup(&edrvInstance_l.np);
+    }
     rtnl_lock();
     emancipate(edrvInstance_l.pSlave);
     rtnl_unlock();
@@ -301,19 +320,10 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     bufferNumber = pBuffer_p->txBufferNumber.value;
 
-    /* XXX From edrv-pcap_linux.c:
-     * "We pretend that packet is sent and immediately call
-     * tx handler! Otherwise the stack would hang!"
-     * But the other edrvs have no special handling for that...
-     * XXX They don't need it, because sending with link down will fail,
-     *     and indicated via tx error interrupt, there they call the tx handler
-     *
-     * If handling is needed, you may use netif_carrier_ok(pSlaveDevice_p)
-     */
-
     /* build a socket buffer */
     skb = build_skb(pBuffer_p->pBuffer, 0);
-    if (!skb) {
+    if (!skb)
+    {
         DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
         return kErrorEdrvNoFreeTxDesc;
     }
@@ -344,7 +354,8 @@ static void packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
 	const struct net_device_ops *ops = dev->netdev_ops;
 	u16 queue_index;
 
-	if (ops->ndo_select_queue) {
+	if (ops->ndo_select_queue)
+        {
 		queue_index = ops->ndo_select_queue(dev, skb, NULL,
 						    __packet_pick_tx_queue);
 		queue_index = netdev_cap_txqueue(dev, queue_index);
@@ -416,17 +427,18 @@ static inline tOplkError __packet_xmit_in_softirq(int pfnXmit_p(struct sk_buff *
 
     return kErrorOk;
 }
-static tOplkError packet_queue_xmit_in_softirq(struct sk_buff *skb) {
+static tOplkError packet_queue_xmit_in_softirq(struct sk_buff *skb)
+{
     return __packet_xmit_in_softirq(dev_queue_xmit, skb);
 }
-static tOplkError packet_direct_xmit_in_softirq(struct sk_buff *skb) {
+static tOplkError packet_direct_xmit_in_softirq(struct sk_buff *skb)
+{
     return __packet_xmit_in_softirq(packet_direct_xmit, skb);
 }
-static tOplkError packet_netpoll_xmit(struct sk_buff *skb) {
-#ifdef CONFIG_NET_POLL_CONTROLLER
-    /* FIXME implement */
-#endif
-    return packet_direct_xmit(skb);
+static tOplkError packet_netpoll_xmit(struct sk_buff *skb)
+{
+    netpoll_send_skb(&edrvInstance_l.np, skb);
+    return kErrorOk;
 }
 
 
@@ -615,7 +627,7 @@ out:
 This function is called as destructor of the socket buffer passed to the driver.
 This signals that the packet has been sent out and space can be reclaimed by DLL
 
-\NOTE XXX runs in NET_TX_SOFTIRQ or NAPI softirq context
+\NOTE runs in NET_RX_SOFTIRQ softirq context
 
 \param[in,out]  pSkb_p            Socket Buffer with reclaimable transmistted packet
 */
