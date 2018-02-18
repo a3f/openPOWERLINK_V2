@@ -218,8 +218,9 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         goto fail;
     }
 
-    if (use_qdisc) {
-        err = kernel_setsockopt(edrvInstance_l.pTxSocket, SOL_PACKET, PACKET_QDISC_BYPASS, (char*)&use_qdisc, sizeof use_qdisc);
+    if (!use_qdisc) {
+        int one = 1;
+        err = kernel_setsockopt(edrvInstance_l.pTxSocket, SOL_PACKET, PACKET_QDISC_BYPASS, (char*)&one, sizeof one);
         if (err < 0)
             DEBUG_LVL_EDRV_TRACE("%s() Couldn't configure PACKET_QDISC_BYPASS on Tx: reason %d\n", __func__, err);
     }
@@ -403,7 +404,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
         return kErrorEdrvNoFreeBufEntry;
 
     // allocate buffer with malloc
-    pBuffer_p->pBuffer = kzalloc(EDRV_MAX_FRAME_SIZE, GFP_KERNEL);
+    pBuffer_p->pBuffer = kzalloc(pBuffer_p->maxBufferSize, GFP_KERNEL);
     if (pBuffer_p->pBuffer == NULL)
         return kErrorEdrvNoFreeBufEntry;
 
@@ -546,10 +547,7 @@ static void packetHandler(tEdrvInstance *pInstance, u8* pPktData_p, size_t dataL
         rxBuffer.rxFrameSize = dataLen_p;
         rxBuffer.pBuffer = pPktData_p;
 
-        if (edrvInstance_l.initParam.pfnRxHandler != NULL)
-        { // Rx handler disables hardirqs, so this is safe to call from process context
-            pInstance->initParam.pfnRxHandler(&rxBuffer);
-        }
+        pInstance->initParam.pfnRxHandler(&rxBuffer);
     }
     else
     {   // self generated traffic
