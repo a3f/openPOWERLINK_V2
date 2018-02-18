@@ -713,8 +713,6 @@ static int enslave(struct net_device *pSlaveDevice_p)
         goto err_unslave;
     }
 
-    pSlaveDevice_p->priv_flags |= IFF_BONDING;
-
     res = netdev_rx_handler_register(pSlaveDevice_p, rxPacketHandler, &edrvInstance_l);
     if (res) {
         DEBUG_LVL_ERROR_TRACE("%s() Error: Error %d calling netdev_rx_handler_register\n", __func__, res);
@@ -743,7 +741,6 @@ err_unregister:
     netdev_rx_handler_unregister(pSlaveDevice_p);
 
 err_detach:
-    pSlaveDevice_p->priv_flags &= ~IFF_BONDING;
     dev_close(pSlaveDevice_p);
 
 err_unslave:
@@ -803,8 +800,6 @@ static int emancipate(struct net_device *pSlaveDevice_p)
     dev_uc_flush(pSlaveDevice_p);
 
     dev_close(pSlaveDevice_p);
-
-    pSlaveDevice_p->priv_flags &= ~IFF_BONDING;
 
     return 0;
 }
