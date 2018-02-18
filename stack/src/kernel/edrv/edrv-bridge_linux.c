@@ -841,6 +841,7 @@ static int emancipate(struct net_device *pSlaveDevice_p)
 
     /* Flush bond's hardware addresses from slave */
     dev_uc_flush(pSlaveDevice_p);
+    dev_mc_flush(pSlaveDevice_p);
 
     dev_close(pSlaveDevice_p);
 
