@@ -68,14 +68,10 @@ GNU General Public License for more details.
 // module global vars
 //------------------------------------------------------------------------------
 
-static char *slave_interface; /* TODO */
+static char *slave_interface;
 module_param(slave_interface, charp, 0);
 MODULE_PARM_DESC(slave_interface, "Slave interface to claim");
 
-/*  __dev_queue_xmit says When calling this method, interrupts MUST be enabled.
- *  So we don't really have any choice... FIXME
- *  Replace with a use_netpoll option?
- */
 static bool use_qdisc = false;
 module_param(use_qdisc, bool, 0);
 MODULE_PARM_DESC(use_qdisc, "Use Qdisc? 0 = no (default), 1 = yes");
@@ -334,10 +330,6 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     skb->dev = edrvInstance_l.pSlave;
     skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
 
-    BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
-            sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
-    skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
-
     skb_shinfo(skb)->destructor_arg = pBuffer_p;
     skb->destructor = txPacketHandler;
 
@@ -350,7 +342,7 @@ static u16 __packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
 	return (u16) raw_smp_processor_id() % dev->real_num_tx_queues;
 }
 
-// FIXME this might require rtnl_lock...
+
 static void packet_pick_tx_queue(struct net_device *dev, struct sk_buff *skb)
 {
 	const struct net_device_ops *ops = dev->netdev_ops;
@@ -409,7 +401,7 @@ drop:
 \brief  TODO Would using a softirq be better in any way?
         TODO this assumes that the function don't sleep!
 
-dev_queue_xmit can't be used with interrupts disabled, so we first renable
+dev_queue_xmit can't be used with interrupts disabled, so we first reenable
 irqs.
 
 \NOTE runs in hardirq context
@@ -437,6 +429,10 @@ static inline tOplkError __packet_xmit_irq_enabled(int pfnXmit_p(struct sk_buff 
 }
 static tOplkError packet_queue_xmit(struct sk_buff *skb)
 {
+    BUILD_BUG_ON(sizeof(skb->queue_mapping) !=
+            sizeof(qdisc_skb_cb(skb)->slave_dev_queue_mapping));
+    skb_set_queue_mapping(skb, qdisc_skb_cb(skb)->slave_dev_queue_mapping);
+
     return __packet_xmit_irq_enabled(dev_queue_xmit, skb);
 }
 static tOplkError packet_direct_xmit(struct sk_buff *skb)
