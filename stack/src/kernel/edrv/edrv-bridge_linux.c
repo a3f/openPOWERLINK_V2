@@ -57,6 +57,11 @@ GNU General Public License for more details.
 //            G L O B A L   D E F I N I T I O N S                             //
 //============================================================================//
 
+/* XXX Why do we need headroom, you might ask? Truth be told, I don't know.
+ * It's 5:30 am and I don't care anymore where that memory corruption comes
+ * from. FIXME one day...
+ */
+#define EDRV_HEADROOM           16
 #define EDRV_TAILROOM           SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE     0x0600
 
@@ -315,14 +320,14 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     bufferNumber = pBuffer_p->txBufferNumber.value;
 
     /* build a socket buffer */
-    skb = build_skb(pBuffer_p->pBuffer, 0);
+    skb = build_skb(pBuffer_p->pBuffer - EDRV_HEADROOM, 0);
     if (!skb)
     {
         DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
         return kErrorEdrvNoFreeTxDesc;
     }
 
-    // build a socket buffer
+    skb_reserve(skb, EDRV_HEADROOM);
     skb_put(skb, pBuffer_p->txFrameSize);
     skb->dev = edrvInstance_l.pSlave;
     skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
@@ -467,10 +472,11 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
      * else with quirky DMA range limitations?
      * We could use edrvInstance_l.pSlave->dev for that...
      */
-    pBuffer_p->pBuffer = kzalloc(EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
+    pBuffer_p->pBuffer = kzalloc(EDRV_HEADROOM + EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
     if (!pBuffer_p->pBuffer)
         return kErrorEdrvNoFreeTxDesc;
 
+    pBuffer_p->pBuffer += EDRV_HEADROOM;
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
 
     return kErrorOk;
@@ -492,7 +498,7 @@ This function releases the Tx buffer.
 tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     ASSERT(pBuffer_p != NULL);
-    kfree(pBuffer_p->pBuffer);
+    kfree(pBuffer_p->pBuffer - EDRV_HEADROOM);
     return kErrorOk;
 }
 
@@ -645,7 +651,7 @@ static void txPacketHandler(struct sk_buff *skb)
     if (pTxBuffer->pfnTxHandler != NULL)
         pTxBuffer->pfnTxHandler(pTxBuffer);
 
-    skb->data = NULL; /* Don't reclaim our buffer */
+    skb->cloned = 1; /* Don't reclaim our buffer */
 }
 
 //------------------------------------------------------------------------------
