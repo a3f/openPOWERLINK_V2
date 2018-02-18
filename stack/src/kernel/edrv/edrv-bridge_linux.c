@@ -241,7 +241,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
                            : use_netpoll ? packet_netpoll_xmit
                            :               packet_direct_xmit_in_softirq;
 
-    DEBUG_LVL_ALWAYS_TRACE("edrv-bridge: %s mode will be used on\n",
+    DEBUG_LVL_ALWAYS_TRACE("edrv-bridge: %s mode will be used on %s\n",
             use_qdisc   ? "Qdisc" :
             use_netpoll ? "Netpoll" :
                           "Direct-xmit",
@@ -533,28 +533,6 @@ tOplkError edrv_changeRxFilter(tEdrvFilter* pFilter_p,
 
 //------------------------------------------------------------------------------
 /**
-\brief  Clear multicast address entry
-
-This function removes the multicast entry from the Ethernet controller.
-
-\note The multicast filters are not supported by this driver.
-
-\param[in]      pMacAddr_p          Multicast address
-
-\return The function returns a tOplkError error code.
-
-\ingroup module_edrv
-*/
-//------------------------------------------------------------------------------
-tOplkError edrv_clearRxMulticastMacAddr(const UINT8* pMacAddr_p)
-{
-    UNUSED_PARAMETER(pMacAddr_p);
-
-    return kErrorOk;
-}
-
-//------------------------------------------------------------------------------
-/**
 \brief  Set multicast address entry
 
 This function sets a multicast entry into the Ethernet controller.
@@ -570,10 +548,37 @@ This function sets a multicast entry into the Ethernet controller.
 //------------------------------------------------------------------------------
 tOplkError edrv_setRxMulticastMacAddr(const UINT8* pMacAddr_p)
 {
-    UNUSED_PARAMETER(pMacAddr_p);
-
-    return kErrorOk;
+    tOplkError ret;
+    rtnl_lock();
+    ret = dev_mc_add(edrvInstance_l.pSlave, pMacAddr_p) ? kErrorEdrvInit : kErrorOk;
+    rtnl_unlock();
+    return ret;
 }
+
+//------------------------------------------------------------------------------
+/**
+\brief  Clear multicast address entry
+
+This function removes the multicast entry from the Ethernet controller.
+
+\note The multicast filters are not supported by this driver.
+
+\param[in]      pMacAddr_p          Multicast address
+
+\return The function returns a tOplkError error code.
+
+\ingroup module_edrv
+*/
+//------------------------------------------------------------------------------
+tOplkError edrv_clearRxMulticastMacAddr(const UINT8* pMacAddr_p)
+{
+    tOplkError ret;
+    rtnl_lock();
+    ret = dev_mc_del(edrvInstance_l.pSlave, pMacAddr_p) ? kErrorEdrvInit : kErrorOk;
+    rtnl_unlock();
+    return ret;
+}
+
 
 //============================================================================//
 //            P R I V A T E   F U N C T I O N S                               //
@@ -706,8 +711,6 @@ static int enslave(struct net_device *pSlaveDevice_p)
     }
 
     pSlaveDevice_p->priv_flags |= IFF_BONDING;
-
-    /* set promiscuity level to new slave */
 
     res = netdev_rx_handler_register(pSlaveDevice_p, rxPacketHandler, &edrvInstance_l);
     if (res) {
