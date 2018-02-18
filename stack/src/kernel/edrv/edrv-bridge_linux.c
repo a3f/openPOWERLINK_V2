@@ -338,6 +338,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
         struct skb_shared_info *shinfo = (struct skb_shared_info *)(pBuffer_p->pBuffer
                                        + SKB_WITH_OVERHEAD(ksize(pBuffer_p->pBuffer)));
         skb = shinfo->frag_list;
+        BUG_ON(shinfo->frag_list != skb_shinfo(skb)->frag_list);
         shinfo->frag_list = NULL;
     }
 
@@ -686,8 +687,7 @@ static void txPacketHandler(struct sk_buff *skb)
     if (pTxBuffer->pfnTxHandler != NULL)
         pTxBuffer->pfnTxHandler(pTxBuffer);
 
-    if (use_build_skb)
-        skb->cloned = 1; /* Don't reclaim our buffer */
+    skb->cloned = 1; /* Don't reclaim our buffer */
 }
 
 //------------------------------------------------------------------------------
