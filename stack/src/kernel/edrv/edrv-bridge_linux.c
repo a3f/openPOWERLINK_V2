@@ -331,10 +331,11 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
             return kErrorEdrvNoFreeTxDesc;
         }
         skb_reserve(skb, EDRV_HEADROOM);
+        skb->cloned = 1; /* Don't reclaim our buffer */
     }
     else
     {
-        skb = pBuffer_p->txBufferNumber.pArg;
+        skb = skb_clone(pBuffer_p->txBufferNumber.pArg, GFP_ATOMIC);
     }
 
     skb_put(skb, pBuffer_p->txFrameSize);
@@ -344,7 +345,6 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     skb_shinfo(skb)->destructor_arg = pBuffer_p;
     skb->destructor = txPacketHandler;
-    skb->cloned = 1; /* Don't reclaim our buffer */
 
     return edrvInstance_l.pfnXmit(skb);
 }
@@ -538,7 +538,7 @@ tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
     else
     {
         struct sk_buff *skb = pBuffer_p->txBufferNumber.pArg;
-        skb->cloned = 0;
+        skb->destructor = NULL;
         dev_kfree_skb(skb);
     }
     return kErrorOk;
