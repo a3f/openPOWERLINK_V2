@@ -64,7 +64,6 @@ GNU General Public License for more details.
 #define EDRV_HEADROOM        (16 + NET_IP_ALIGN)
 #define EDRV_TAILROOM        SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE  0x0600
-#define EDRV_SHINFO(data)    ((struct skb_shared_info *)((data) + SKB_WITH_OVERHEAD(ksize(data))))
 
 //------------------------------------------------------------------------------
 // const defines
@@ -318,7 +317,6 @@ This function sends the Tx buffer.
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     struct sk_buff *skb;
-    void           *dst;
 
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
@@ -336,12 +334,10 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     }
     else
     {
-        struct skb_shared_info *shinfo = EDRV_SHINFO(pBuffer_p->pBuffer);
-        skb = shinfo->frag_list;
-        BUG_ON(shinfo->frag_list != skb_shinfo(skb)->frag_list);
+        skb = pBuffer_p->txBufferNumber.pArg;
     }
 
-    dst = skb_put(skb, pBuffer_p->txFrameSize);
+    skb_put(skb, pBuffer_p->txFrameSize);
 
     skb->dev = edrvInstance_l.pSlave;
     skb_reset_network_header(skb); /* silences protocol 0000 is buggy WARNs */
@@ -502,7 +498,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
         skb = alloc_skb(EDRV_MAX_FRAME_SIZE, GFP_KERNEL);
         if (skb)
         {
-            skb_shinfo(skb)->frag_list = skb;
+            pBuffer_p->txBufferNumber.pArg = skb;
             pBuffer_p->pBuffer = skb->data;
         }
     }
@@ -541,10 +537,8 @@ tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
     }
     else
     {
-        struct sk_buff *skb;
-        struct skb_shared_info *shinfo = EDRV_SHINFO(pBuffer_p->pBuffer);
-        skb = shinfo->frag_list;
-        shinfo->frag_list = NULL;
+        struct sk_buff *skb = pBuffer_p->txBufferNumber.pArg;
+        skb->cloned = 0;
         dev_kfree_skb(skb);
     }
     return kErrorOk;
