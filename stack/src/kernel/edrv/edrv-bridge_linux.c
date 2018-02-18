@@ -183,9 +183,7 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     }
 
     if (enslave(pSlaveDevice) != 0)
-    {
         goto unlock;
-    }
 
     /* if no MAC address was specified read MAC address of used
      * Ethernet interface
@@ -263,9 +261,8 @@ This function shuts down the Ethernet driver.
 tOplkError edrv_exit(void)
 {
     if (edrvInstance_l.np.dev)
-    {
         netpoll_cleanup(&edrvInstance_l.np);
-    }
+
     rtnl_lock();
     emancipate(edrvInstance_l.pSlave);
     rtnl_unlock();
@@ -619,10 +616,9 @@ static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
     rxBuffer.rxFrameSize = skb->len;
     rxBuffer.pBuffer = skb->data;
 
+    // Rx handler disables hardirqs, so this is safe to call from softirq context
     if (edrvInstance_l.initParam.pfnRxHandler != NULL)
-    { // Rx handler disables hardirqs, so this is safe to call from softirq context
         pInstance->initParam.pfnRxHandler(&rxBuffer);
-    }
 
 out:
     consume_skb(skb);
@@ -645,10 +641,9 @@ static void txPacketHandler(struct sk_buff *skb)
 {
     tEdrvTxBuffer *pTxBuffer = skb_shinfo(skb)->destructor_arg;
 
+    // Tx handler disables hardirqs, so this is safe to call from softirq context
     if (pTxBuffer->pfnTxHandler != NULL)
-    { // Tx handler disables hardirqs, so this is safe to call from softirq context
         pTxBuffer->pfnTxHandler(pTxBuffer);
-    }
 
     skb->data = NULL; /* Don't reclaim our buffer */
 }
