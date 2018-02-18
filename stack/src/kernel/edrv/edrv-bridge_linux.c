@@ -61,7 +61,7 @@ GNU General Public License for more details.
  * It's 5:30 am and I don't care anymore where that memory corruption comes
  * from. FIXME one day...
  */
-#define EDRV_HEADROOM           16
+#define EDRV_HEADROOM           (16 + NET_IP_ALIGN)
 #define EDRV_TAILROOM           SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE     0x0600
 
@@ -335,8 +335,10 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     }
     else
     {
-        skb = skb_shinfo(skb)->frag_list;
-        skb_shinfo(skb)->frag_list = NULL;
+        struct skb_shared_info *shinfo = (struct skb_shared_info *)(pBuffer_p->pBuffer
+                                       + SKB_WITH_OVERHEAD(ksize(pBuffer_p->pBuffer)));
+        skb = shinfo->frag_list;
+        shinfo->frag_list = NULL;
     }
 
     dst = skb_put(skb, pBuffer_p->txFrameSize);
