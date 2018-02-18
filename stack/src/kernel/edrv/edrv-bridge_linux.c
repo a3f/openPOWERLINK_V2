@@ -61,9 +61,10 @@ GNU General Public License for more details.
  * It's 5:30 am and I don't care anymore where that memory corruption comes
  * from. FIXME one day...
  */
-#define EDRV_HEADROOM           (16 + NET_IP_ALIGN)
-#define EDRV_TAILROOM           SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
-#define EDRV_MAX_FRAME_SIZE     0x0600
+#define EDRV_HEADROOM        (16 + NET_IP_ALIGN)
+#define EDRV_TAILROOM        SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
+#define EDRV_MAX_FRAME_SIZE  0x0600
+#define EDRV_SHINFO(data)    ((struct skb_shared_info *)((data) + SKB_WITH_OVERHEAD(ksize(data))))
 
 //------------------------------------------------------------------------------
 // const defines
@@ -335,11 +336,9 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     }
     else
     {
-        struct skb_shared_info *shinfo = (struct skb_shared_info *)(pBuffer_p->pBuffer
-                                       + SKB_WITH_OVERHEAD(ksize(pBuffer_p->pBuffer)));
+        struct skb_shared_info *shinfo = EDRV_SHINFO(pBuffer_p->pBuffer);
         skb = shinfo->frag_list;
         BUG_ON(shinfo->frag_list != skb_shinfo(skb)->frag_list);
-        shinfo->frag_list = NULL;
     }
 
     dst = skb_put(skb, pBuffer_p->txFrameSize);
@@ -349,6 +348,7 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     skb_shinfo(skb)->destructor_arg = pBuffer_p;
     skb->destructor = txPacketHandler;
+    skb->cloned = 1; /* Don't reclaim our buffer */
 
     return edrvInstance_l.pfnXmit(skb);
 }
@@ -482,7 +482,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
-    BUG_ON(irqs_disabled());
+    BUG_ON(in_interrupt());
     if (pBuffer_p->maxBufferSize > EDRV_MAX_FRAME_SIZE)
         return kErrorEdrvNoFreeBufEntry;
 
@@ -533,8 +533,20 @@ This function releases the Tx buffer.
 tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     ASSERT(pBuffer_p != NULL);
+    BUG_ON(in_interrupt());
+
     if (use_build_skb)
+    {
         kfree(pBuffer_p->pBuffer - EDRV_HEADROOM);
+    }
+    else
+    {
+        struct sk_buff *skb;
+        struct skb_shared_info *shinfo = EDRV_SHINFO(pBuffer_p->pBuffer);
+        skb = shinfo->frag_list;
+        shinfo->frag_list = NULL;
+        dev_kfree_skb(skb);
+    }
     return kErrorOk;
 }
 
@@ -686,8 +698,6 @@ static void txPacketHandler(struct sk_buff *skb)
     // Tx handler disables hardirqs, so this is safe to call from softirq context
     if (pTxBuffer->pfnTxHandler != NULL)
         pTxBuffer->pfnTxHandler(pTxBuffer);
-
-    skb->cloned = 1; /* Don't reclaim our buffer */
 }
 
 //------------------------------------------------------------------------------
