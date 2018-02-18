@@ -38,6 +38,8 @@ flags_c = [
     '-isystem', '/usr/src/linux/usr/include',
     '-isystem', '/usr/src/linux/usr/lib/gcc/i686-redhat-linux/4.5.1/include',
     '-isystem', '/Users/a3f/dl/openPOWERLINK_V2/stack/include',
+    '-isystem', '/Users/a3f/dl/openPOWERLINK_V2/stack/include/common',
+    '-isystem', '/Users/a3f/dl/openPOWERLINK_V2/contrib',
     '-isystem', '/Users/a3f/dl/openPOWERLINK_V2/drivers/linux/drv_kernelmod_edrv/proj/cn/',
     # Will be path mangled
     '-I', '/usr/src/linux/include',

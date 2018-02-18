@@ -57,10 +57,6 @@ GNU General Public License for more details.
 //            G L O B A L   D E F I N I T I O N S                             //
 //============================================================================//
 
-#ifndef TRACE
-#define TRACE printk
-#endif
-
 #define EDRV_TAILROOM           SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE     0x0600
 
@@ -244,6 +240,12 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     edrvInstance_l.pfnXmit = use_qdisc   ? packet_queue_xmit_in_softirq
                            : use_netpoll ? packet_netpoll_xmit
                            :               packet_direct_xmit_in_softirq;
+
+    DEBUG_LVL_ALWAYS_TRACE("edrv-bridge: %s mode will be used on\n",
+            use_qdisc   ? "Qdisc" :
+            use_netpoll ? "Netpoll" :
+                          "Direct-xmit",
+            slave_interface);
 
     ret = kErrorOk;
 
