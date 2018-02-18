@@ -95,9 +95,6 @@ MODULE_PARM_DESC(use_qdisc, "Qdisc, 0 = disabled, 1 = enabled (default)");
 // const defines
 //------------------------------------------------------------------------------
 #define EDRV_MAX_FRAME_SIZE     0x0600
-#ifndef TRACE
-#define TRACE printk
-#endif
 
 //------------------------------------------------------------------------------
 // local types
@@ -114,23 +111,12 @@ typedef struct
     tEdrvTxBuffer*         pTransmittedTxBufferLastEntry;      ///< Pointer to the last entry of the transmitted TX buffer
     tEdrvTxBuffer*         pTransmittedTxBufferFirstEntry;     ///< Pointer to the first entry of the transmitted Tx buffer
     spinlock_t             txBufferSpinlock;
-    spinlock_t             txListSpinlock;
     struct completion      syncStart;                          ///< Completion for signaling the start of the worker thread
     struct socket*         pTxSocket;                          ///< Tx socket
-    struct list_head       txList;                             ///< Tx's to be process in softirq
     struct task_struct    *pRxThread;                          ///< Handle of the Rx worker thread
-    struct tasklet_struct  txTasklet;                          ///< Handle of the Tx Tasklet
     struct net_device     *pDev;                               ///< Handle of the worker thread
     BOOL                   fCloseDevLater;                     ///< Whether we raised the interface
 } tEdrvInstance;
-
-typedef struct {
-    UINT8             data[EDRV_MAX_FRAME_SIZE];
-    tEdrvTxBuffer     edrvTxBuffer;
-    UINT              cookie;
-
-    struct list_head  txBufferList;
-} tTxBuffer;
 
 //------------------------------------------------------------------------------
 // local vars
@@ -146,7 +132,6 @@ static int            getMacAdrs(struct net_device *pDev_p, UINT8* pMacAddr_p, i
 static struct socket *startSocket(int ifIndex_p);
 static BOOL           getLinkStatus(struct net_device *pDev_p);
 static BOOL           getInterfaceStatus(struct net_device *pDev_p);
-static void           sendTxBuffer_in_softirq(unsigned long flag);
 
 //============================================================================//
 //            P U B L I C   F U N C T I O N S                                 //
@@ -227,9 +212,6 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
         }
     }
 
-    INIT_LIST_HEAD(&edrvInstance_l.txList);
-    tasklet_init(&edrvInstance_l.txTasklet, sendTxBuffer_in_softirq, 0L);
-
     edrvInstance_l.pTxSocket = startSocket(edrvInstance_l.ifIndex);
     if (edrvInstance_l.pTxSocket == NULL)
     {
@@ -244,7 +226,6 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
 
 
     spin_lock_init(&edrvInstance_l.txBufferSpinlock);
-    spin_lock_init(&edrvInstance_l.txListSpinlock);
 
     init_completion(&edrvInstance_l.syncStart);
 
@@ -294,9 +275,6 @@ tOplkError edrv_exit(void)
         sock_release(edrvInstance_l.pTxSocket);
     }
 
-    if (edrvInstance_l.txList.prev)
-        tasklet_kill(&edrvInstance_l.txTasklet);
-
     if (edrvInstance_l.fCloseDevLater) {
         rtnl_lock();
         dev_close(edrvInstance_l.pDev);
@@ -343,111 +321,64 @@ This function sends the Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    tTxBuffer *txb;
-    unsigned long flags;
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
     if (pBuffer_p->txBufferNumber.pArg != NULL)
         return kErrorInvalidOperation;
 
-    txb = (tTxBuffer*)(pBuffer_p->pBuffer);
-    txb->cookie = 0xBADC0FFE;
-    printk("%s(cpu_id=%d) upper half, got pBuffer %p txb=%p\n", __func__, smp_processor_id(), pBuffer_p, txb);
-
-
-    //node = container_of(&pBuffer_p->pBuffer[0], tTxBuffer, data[0]);
-    spin_lock_irqsave(&edrvInstance_l.txBufferSpinlock, flags);
-    if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
+    /* FIXME this would deadlock */
+    if (getLinkStatus(edrvInstance_l.pDev) == FALSE)
     {
-        edrvInstance_l.pTransmittedTxBufferLastEntry =
-            edrvInstance_l.pTransmittedTxBufferFirstEntry = pBuffer_p;
+        /* there's no link! We pretend that packet is sent and schedule the 
+         * tx handler! Otherwise the stack would hang! */
+        if (pBuffer_p->pfnTxHandler != NULL)
+        {
+            pBuffer_p->pfnTxHandler(pBuffer_p);
+        }
     }
     else
     {
-        edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer_p;
-        edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer_p;
-    }
-    spin_unlock_irqrestore(&edrvInstance_l.txBufferSpinlock, flags);
+        struct kvec   iov;
+        struct msghdr msg = {};
+        int           bytesSent;
+        bool          enable_irqs;
 
-    txb->edrvTxBuffer = *pBuffer_p;
-
-    /* Process in bottom half, where we run with irqs enabled
-     * FIXME Can kernel_sendmsg sleep? if so, we need to change this
-     *      after the panic
-     */
-    spin_lock_irqsave(&edrvInstance_l.txListSpinlock, flags);
-    list_add_tail(&txb->txBufferList, &edrvInstance_l.txList);
-    spin_unlock_irqrestore(&edrvInstance_l.txListSpinlock, flags);
-#if 1
-    tasklet_schedule(&edrvInstance_l.txTasklet);
-#else
-    sendTxBuffer_in_softirq(0);
-#endif
-    printk("%s() } upper half ended\n", __func__);
-    return kErrorOk;
-}
-static void sendTxBuffer_in_softirq(unsigned long arg)
-{
-    LIST_HEAD(list);
-
-    tTxBuffer *txb, *n;
-    unsigned long flags;
-    int i = 0;
-    BOOL fRunning;
-    printk("%s(cpu_id=%d) { bottom half begins\n", __func__,smp_processor_id());
-    fRunning = getLinkStatus(edrvInstance_l.pDev);
-
-//    BUG_ON(smp_processor_id() != 1);
-    (void)arg;
-
-
-    spin_lock_irqsave(&edrvInstance_l.txListSpinlock, flags);
-    list_splice_init(&edrvInstance_l.txList, &list);
-    spin_unlock_irqrestore(&edrvInstance_l.txListSpinlock, flags);
-
-    list_for_each_entry_safe(txb, n, &list, txBufferList)
-    {
-
-        tEdrvTxBuffer *pBuffer = &txb->edrvTxBuffer;
-        list_del_init(&txb->txBufferList);
-
-        printk("%s(cpu_id=%d) [%i] bottom half, got pBuffer=%p(pBuffer=%p), txb=%p cookie=%08x\n", __func__, smp_processor_id(), i++, pBuffer, pBuffer->pBuffer, txb, txb->cookie);
-
-        BUG_ON(txb->cookie != 0xBADC0FFE);
-
-
-        if (!fRunning)
+        unsigned long flags;
+        spin_lock_irqsave(&edrvInstance_l.txBufferSpinlock, flags);
+        if (edrvInstance_l.pTransmittedTxBufferLastEntry == NULL)
         {
-            /* there's no link! We pretend that packet is sent and immediately call
-             * tx handler! Otherwise the stack would hang! */
-            if (pBuffer->pfnTxHandler != NULL)
-            {
-                pBuffer->pfnTxHandler(pBuffer);
-            }
+            edrvInstance_l.pTransmittedTxBufferLastEntry =
+                edrvInstance_l.pTransmittedTxBufferFirstEntry = pBuffer_p;
         }
         else
         {
-            struct kvec   iov;
-            struct msghdr msg = {};
-            int           bytesSent;
+            edrvInstance_l.pTransmittedTxBufferLastEntry->txBufferNumber.pArg = pBuffer_p;
+            edrvInstance_l.pTransmittedTxBufferLastEntry = pBuffer_p;
+        }
+        spin_unlock_irqrestore(&edrvInstance_l.txBufferSpinlock, flags);
 
-            iov.iov_base = pBuffer->pBuffer;
-            iov.iov_len = pBuffer->txFrameSize;
 
-            bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, iov.iov_len);
-            printk("%s() sending message\n", __func__);
+        iov.iov_base = pBuffer_p->pBuffer;
+        iov.iov_len = pBuffer_p->txFrameSize;
 
-            if (unlikely(bytesSent != iov.iov_len))
-            {
-                DEBUG_LVL_EDRV_TRACE("%s() kernel_sendmsg returned %d instead of %zu\n",
-                        __func__, bytesSent, iov.iov_len);
-            }
+        /* FIXME Can kernel_sendmsg sleep? if so, we need to change this
+         *      after the panic
+         *         It will probably sleep if the send buffer is full...
+         */
+        enable_irqs = irqs_disabled();
+        if (enable_irqs) local_irq_enable();
+        bytesSent = kernel_sendmsg(edrvInstance_l.pTxSocket, &msg, &iov, 1, iov.iov_len);
+        if (enable_irqs) local_irq_disable();
 
+        if (unlikely(bytesSent != iov.iov_len))
+        {
+            DEBUG_LVL_EDRV_TRACE("%s() kernel_sendmsg returned %d instead of %zu\n",
+                    __func__, bytesSent, iov.iov_len);
         }
     }
-    printk("%s() } bottom half ended\n", __func__);
 
+    return kErrorOk;
 }
 
 //------------------------------------------------------------------------------
@@ -465,7 +396,6 @@ This function allocates a Tx buffer.
 //------------------------------------------------------------------------------
 tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
-    tTxBuffer *pTxB;
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
@@ -473,13 +403,10 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
         return kErrorEdrvNoFreeBufEntry;
 
     // allocate buffer with malloc
-    pTxB = kzalloc(sizeof *pTxB, GFP_KERNEL);
-    if (pTxB == NULL)
+    pBuffer_p->pBuffer = kzalloc(EDRV_MAX_FRAME_SIZE, GFP_KERNEL);
+    if (pBuffer_p->pBuffer == NULL)
         return kErrorEdrvNoFreeBufEntry;
 
-    INIT_LIST_HEAD(&pTxB->txBufferList);
-    pBuffer_p->pBuffer = pTxB->data;
-    pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
     pBuffer_p->txBufferNumber.pArg = NULL;
 
     return kErrorOk;
@@ -510,7 +437,7 @@ tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
     // mark buffer as free, before actually freeing it
     pBuffer_p->pBuffer = NULL;
 
-    OPLK_FREE(pBuffer);
+    kfree(pBuffer);
 
     return kErrorOk;
 }
