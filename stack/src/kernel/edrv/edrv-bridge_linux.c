@@ -663,7 +663,8 @@ static void txPacketHandler(struct sk_buff *skb)
     if (pTxBuffer->pfnTxHandler != NULL)
         pTxBuffer->pfnTxHandler(pTxBuffer);
 
-    skb->cloned = 1; /* Don't reclaim our buffer */
+    if (use_build_skb)
+        skb->cloned = 1; /* Don't reclaim our buffer */
 }
 
 //------------------------------------------------------------------------------
