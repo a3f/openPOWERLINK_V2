@@ -61,7 +61,7 @@ GNU General Public License for more details.
  * It's 5:30 am and I don't care anymore where that memory corruption comes
  * from. FIXME one day...
  */
-#define EDRV_HEADROOM        (16 + NET_IP_ALIGN)
+#define EDRV_HEADROOM        0 //(16 + NET_IP_ALIGN)
 #define EDRV_TAILROOM        SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE  0x0600
 
@@ -89,9 +89,9 @@ module_param(use_netpoll, bool, 0);
 static int use_netpoll = false;
 #endif
 
-static bool use_build_skb = false;
+static bool use_build_skb = true; /* FIXME if it turns out stable enough, remove option */
 module_param(use_build_skb, bool, 0);
-MODULE_PARM_DESC(use_build_skb, "Use build_skb? 0 = no (default), 1 = yes");
+MODULE_PARM_DESC(use_build_skb, "Use build_skb? 0 = no, 1 = yes (default)");
 
 
 //------------------------------------------------------------------------------
@@ -331,7 +331,6 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
             return kErrorEdrvNoFreeTxDesc;
         }
         skb_reserve(skb, EDRV_HEADROOM);
-        skb->cloned = 1; /* Don't reclaim our buffer */
     }
     else
     {
@@ -692,6 +691,10 @@ static void txPacketHandler(struct sk_buff *skb)
     // Tx handler disables hardirqs, so this is safe to call from softirq context
     if (pTxBuffer->pfnTxHandler != NULL)
         pTxBuffer->pfnTxHandler(pTxBuffer);
+
+    /* Don't reclaim our buffer, we could also bump reference counter... */
+    if (use_build_skb)
+        skb->head = NULL;
 }
 
 //------------------------------------------------------------------------------

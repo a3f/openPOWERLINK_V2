@@ -10,7 +10,7 @@ SLAVE_IF  ?= enp0s8
 ARCH      ?= x86_64
 QDISC     ?= 0
 NETPOLL   ?= 1
-BUILD_SKB ?= 0
+BUILD_SKB ?= 1
 
 MODOPTS   := slave_interface=$(SLAVE_IF) use_qdisc=$(QDISC) use_netpoll=$(NETPOLL) use_build_skb=$(BUILD_SKB) $(MODOPTS)
 
