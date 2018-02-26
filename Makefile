@@ -49,6 +49,12 @@ test_bridge: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko $(MODOPTS)
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
+test_bridge_cn: bin/linux/$(ARCH)/demo_cn_console/demo_cn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_bridgemn.ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
+	sudo ifconfig $(SLAVE_IF) down
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_bridgemn.ko $(MODOPTS)
+	cd bin/linux/$(ARCH)/demo_cn_console && sudo ./demo_cn_console
+
 test_rawsock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_rawsockmn.ko
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_rawsockmn.ko || echo Nothing to unload
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplkgeneric_rawsockmn.ko $(MODOPTS)
@@ -86,6 +92,9 @@ select_drivers:
 
 configure_demo_mn:
 	cd apps/demo_mn_console/build/linux && ccmake -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ../..
+
+configure_demo_cn:
+	cd apps/demo_cn_console/build/linux && ccmake -DCFG_DEBUG_LVL=${DEBUG_LVL} -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) ../..
 
 drivers/linux/drv_kernelmod_edrv/build/Makefile:
 	@echo :: Configuring for ${BUILD_TYPE}...
