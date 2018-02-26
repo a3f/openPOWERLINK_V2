@@ -76,6 +76,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //            G L O B A L   D E F I N I T I O N S                             //
 //============================================================================//
 
+#define TGT_DLLK_ENTER_CRITICAL_SECTION_TX() if (!pTxBuffer_p->is_lock_protected) { TGT_DLLK_ENTER_CRITICAL_SECTION() }
+#define TGT_DLLK_LEAVE_CRITICAL_SECTION_TX() if (!pTxBuffer_p->is_lock_protected) { TGT_DLLK_LEAVE_CRITICAL_SECTION() }
+
 //------------------------------------------------------------------------------
 // const defines
 //------------------------------------------------------------------------------
@@ -388,7 +391,7 @@ void dllkframe_processTransmittedNmtReq(tEdrvTxBuffer* pTxBuffer_p)
 
     TGT_DLLK_DECLARE_FLAGS
 
-    TGT_DLLK_ENTER_CRITICAL_SECTION()
+    TGT_DLLK_ENTER_CRITICAL_SECTION_TX()
 
     nmtState = dllkInstance_g.nmtState;
     if (nmtState <= kNmtGsResetConfiguration)
@@ -464,7 +467,7 @@ Exit:
         eventk_postError(kEventSourceDllk, ret, sizeof(arg), &arg);
     }
 
-    TGT_DLLK_LEAVE_CRITICAL_SECTION()
+    TGT_DLLK_LEAVE_CRITICAL_SECTION_TX()
 }
 
 //------------------------------------------------------------------------------
@@ -489,7 +492,7 @@ void dllkframe_processTransmittedNonPlk(tEdrvTxBuffer* pTxBuffer_p)
 
     TGT_DLLK_DECLARE_FLAGS
 
-    TGT_DLLK_ENTER_CRITICAL_SECTION()
+    TGT_DLLK_ENTER_CRITICAL_SECTION_TX()
 
     nmtState = dllkInstance_g.nmtState;
     if (nmtState <= kNmtGsResetConfiguration)
@@ -537,7 +540,7 @@ Exit:
         eventk_postError(kEventSourceDllk, ret, sizeof(arg), &arg);
     }
 
-    TGT_DLLK_LEAVE_CRITICAL_SECTION()
+    TGT_DLLK_LEAVE_CRITICAL_SECTION_TX()
 }
 
 //------------------------------------------------------------------------------
@@ -1152,7 +1155,7 @@ void dllkframe_processTransmittedSoc(tEdrvTxBuffer* pTxBuffer_p)
 
     UNUSED_PARAMETER(pTxBuffer_p);
 
-    TGT_DLLK_ENTER_CRITICAL_SECTION()
+    TGT_DLLK_ENTER_CRITICAL_SECTION_TX()
 
     nmtState = dllkInstance_g.nmtState;
     if (nmtState <= kNmtGsResetConfiguration)
@@ -1171,7 +1174,7 @@ Exit:
         eventk_postError(kEventSourceDllk, ret, sizeof(arg), &arg);
     }
 
-    TGT_DLLK_LEAVE_CRITICAL_SECTION()
+    TGT_DLLK_LEAVE_CRITICAL_SECTION_TX()
 }
 
 //------------------------------------------------------------------------------
@@ -1194,7 +1197,7 @@ void dllkframe_processTransmittedSoa(tEdrvTxBuffer* pTxBuffer_p)
 
     TGT_DLLK_DECLARE_FLAGS
 
-    TGT_DLLK_ENTER_CRITICAL_SECTION()
+    TGT_DLLK_ENTER_CRITICAL_SECTION_TX()
 
     nmtState = dllkInstance_g.nmtState;
     if (nmtState <= kNmtGsResetConfiguration)
@@ -1317,7 +1320,7 @@ Exit:
         eventk_postError(kEventSourceDllk, ret, sizeof(arg), &arg);
     }
 
-    TGT_DLLK_LEAVE_CRITICAL_SECTION()
+    TGT_DLLK_LEAVE_CRITICAL_SECTION_TX()
 }
 
 //------------------------------------------------------------------------------

@@ -495,6 +495,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
         return kErrorEdrvNoFreeTxDesc;
 
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
+    pBuffer_p->is_lock_protected = FALSE;
 
     return kErrorOk;
 }
@@ -674,7 +675,7 @@ This signals that the packet has been sent out and space can be reclaimed by DLL
 \NOTE runs in NET_RX_SOFTIRQ softirq context
       FIXME This will deadlock if the destructor is called further down the call stack,
             from edrv_sendTxBuffer. We need to detect this somewhow and schedule a
-            tasklet...
+            tasklet... Till then use this ugly .is_lock_protected workaround
 
 \param[in,out]  pSkb_p            Socket Buffer with reclaimable transmistted packet
 */
@@ -684,8 +685,11 @@ static void txPacketHandler(struct sk_buff *skb)
     tEdrvTxBuffer *pTxBuffer = skb_shinfo(skb)->destructor_arg;
 
     // Tx handler disables hardirqs, so this is safe to call from softirq context
-    if (pTxBuffer->pfnTxHandler != NULL)
+    if (pTxBuffer->pfnTxHandler != NULL) {
+        if (!use_netpoll) pTxBuffer->is_lock_protected = TRUE;
         pTxBuffer->pfnTxHandler(pTxBuffer);
+        if (!use_netpoll) pTxBuffer->is_lock_protected = FALSE;
+    }
 
     /* Don't reclaim our buffer, we could also bump reference counter... */
     if (use_build_skb)
