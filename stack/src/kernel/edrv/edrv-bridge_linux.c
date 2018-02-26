@@ -48,11 +48,6 @@ interface, which is then used exclusively for openPOWERLINK communication.
 //            G L O B A L   D E F I N I T I O N S                             //
 //============================================================================//
 
-/* XXX Why do we need headroom, you might ask? Truth be told, I don't know.
- * It's 5:30 am and I don't care anymore where that memory corruption comes
- * from. FIXME one day...
- */
-#define EDRV_HEADROOM        0 //(16 + NET_IP_ALIGN)
 #define EDRV_TAILROOM        SKB_DATA_ALIGN(sizeof(struct skb_shared_info))
 #define EDRV_MAX_FRAME_SIZE  0x0600
 
@@ -317,13 +312,12 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
     /* build a socket buffer */
     if (use_build_skb)
     {
-        skb = build_skb(pBuffer_p->pBuffer - EDRV_HEADROOM, 0);
+        skb = build_skb(pBuffer_p->pBuffer, 0);
         if (!skb)
         {
             DEBUG_LVL_ERROR_TRACE("%s() build_skb failed\n", __func__);
             return kErrorEdrvNoFreeTxDesc;
         }
-        skb_reserve(skb, EDRV_HEADROOM);
     }
     else
     {
@@ -481,7 +475,7 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     if (use_build_skb)
     {
-        pBuffer_p->pBuffer = kzalloc(EDRV_HEADROOM + EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
+        pBuffer_p->pBuffer = kzalloc(EDRV_MAX_FRAME_SIZE + EDRV_TAILROOM, GFP_KERNEL);
     }
     else
     {
@@ -498,8 +492,6 @@ tOplkError edrv_allocTxBuffer(tEdrvTxBuffer* pBuffer_p)
     if (!pBuffer_p->pBuffer)
         return kErrorEdrvNoFreeTxDesc;
 
-    if (use_build_skb)
-        pBuffer_p->pBuffer += EDRV_HEADROOM;
     pBuffer_p->maxBufferSize = EDRV_MAX_FRAME_SIZE;
 
     return kErrorOk;
@@ -525,7 +517,7 @@ tOplkError edrv_freeTxBuffer(tEdrvTxBuffer* pBuffer_p)
 
     if (use_build_skb)
     {
-        kfree(pBuffer_p->pBuffer - EDRV_HEADROOM);
+        kfree(pBuffer_p->pBuffer);
     }
     else
     {
@@ -643,21 +635,26 @@ static rx_handler_result_t rxPacketHandler(struct sk_buff **pSkb_p)
     struct sk_buff *skb = *pSkb_p;
 
     skb = skb_share_check(skb, GFP_ATOMIC);
-    if (unlikely(!skb))
+    if (unlikely(!skb)) {
+        DEBUG_LVL_ERROR_TRACE("%s() Allocation failure in skb_share_check\n", __func__);
         return RX_HANDLER_CONSUMED;
+    }
 
-    if (skb_linearize(skb))
+    if (skb_linearize(skb)) {
+        DEBUG_LVL_ERROR_TRACE("%s() No memory to skb_linearize\n", __func__);
         goto out; /* drop packet */
+    }
 
     *pSkb_p = skb;
     pInstance = rcu_dereference(skb->dev->rx_handler_data);
 
-    rxBuffer.bufferInFrame = kEdrvBufferLastInFrame;
+    // skb->data points is at the network header
+    rxBuffer.pBuffer = __skb_push(skb, skb->data - skb_mac_header(skb));
     rxBuffer.rxFrameSize = skb->len;
-    rxBuffer.pBuffer = skb->data;
+    rxBuffer.bufferInFrame = kEdrvBufferLastInFrame;
 
     // Rx handler disables hardirqs, so this is safe to call from softirq context
-    if (edrvInstance_l.initParam.pfnRxHandler != NULL)
+    if (pInstance->initParam.pfnRxHandler != NULL)
         pInstance->initParam.pfnRxHandler(&rxBuffer);
 
 out:
@@ -673,6 +670,9 @@ This function is called as destructor of the socket buffer passed to the driver.
 This signals that the packet has been sent out and space can be reclaimed by DLL
 
 \NOTE runs in NET_RX_SOFTIRQ softirq context
+      FIXME This will deadlock if the destructor is called further down the call stack,
+            from edrv_sendTxBuffer. We need to detect this somewhow and schedule a
+            tasklet...
 
 \param[in,out]  pSkb_p            Socket Buffer with reclaimable transmistted packet
 */
