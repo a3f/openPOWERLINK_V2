@@ -216,16 +216,18 @@ tOplkError edrv_init(const tEdrvInitParam* pEdrvInitParam_p)
     }
 
 #ifdef CONFIG_NETPOLL
-    edrvInstance_l.np.name = "oplk-edrv-bridge";
-    strlcpy(edrvInstance_l.np.dev_name, slave_interface, IFNAMSIZ);
-    err = __netpoll_setup(&edrvInstance_l.np, pSlaveDevice);
-    if (err < 0)
+    if (use_netpoll)
     {
-        DEBUG_LVL_ERROR_TRACE("%s() Failed to setup netpoll for %s: error %d\n", pSlaveDevice, err);
-        edrvInstance_l.np.dev = NULL;
-        goto unlock;
+        edrvInstance_l.np.name = "oplk-edrv-bridge";
+        strlcpy(edrvInstance_l.np.dev_name, slave_interface, IFNAMSIZ);
+        err = __netpoll_setup(&edrvInstance_l.np, pSlaveDevice);
+        if (err < 0)
+        {
+            DEBUG_LVL_ERROR_TRACE("%s() Failed to setup netpoll for %s: error %d\n", __func__, pSlaveDevice, err);
+            edrvInstance_l.np.dev = NULL;
+            goto unlock;
+        }
     }
-    use_netpoll = true;
 #endif
 
     edrvInstance_l.pfnXmit = use_qdisc   ? packet_queue_xmit
