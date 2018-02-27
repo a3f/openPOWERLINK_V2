@@ -308,6 +308,16 @@ tOplkError edrv_sendTxBuffer(tEdrvTxBuffer* pBuffer_p)
 {
     struct sk_buff *skb;
 
+    if (!netif_carrier_ok(edrvInstance_l.pSlave))
+    {
+        if (pBuffer_p->pfnTxHandler != NULL) {
+            pBuffer_p->is_lock_protected = TRUE;
+            pBuffer_p->pfnTxHandler(pBuffer_p);
+            pBuffer_p->is_lock_protected = FALSE;
+        }
+        return kErrorOk;
+    }
+
     // Check parameter validity
     ASSERT(pBuffer_p != NULL);
 
