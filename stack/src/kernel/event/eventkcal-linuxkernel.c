@@ -57,6 +57,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <linux/uaccess.h>
 #include <asm/uaccess.h>
 #include <asm/atomic.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <uapi/linux/sched/types.h>
+#endif
 
 //============================================================================//
 //            G L O B A L   D E F I N I T I O N S                             //
