@@ -107,7 +107,9 @@ typedef struct
     tEdrvInitParam      initParam;                          ///< Init parameters
     struct net_device  *pSlave;
     tOplkError        (*pfnXmit)(struct sk_buff *pSkb_p);
+#ifdef CONFIG_NETPOLL
     struct netpoll      np;
+#endif
 } tEdrvInstance;
 
 //------------------------------------------------------------------------------
@@ -260,8 +262,10 @@ This function shuts down the Ethernet driver.
 //------------------------------------------------------------------------------
 tOplkError edrv_exit(void)
 {
+#ifdef CONFIG_NETPOLL
     if (edrvInstance_l.np.dev)
         netpoll_cleanup(&edrvInstance_l.np);
+#endif
 
     rtnl_lock();
     emancipate(edrvInstance_l.pSlave);
@@ -452,7 +456,9 @@ static tOplkError packet_direct_xmit(struct sk_buff *skb)
 }
 static tOplkError packet_netpoll_xmit(struct sk_buff *skb)
 {
+#ifdef CONFIG_NETPOLL
     netpoll_send_skb(&edrvInstance_l.np, skb);
+#endif
     return kErrorOk;
 }
 
@@ -677,7 +683,7 @@ out:
 
 //------------------------------------------------------------------------------
 /**
-\brief  Edrv tranmission completion handler
+\brief  Edrv transmission completion handler
 
 This function is called as destructor of the socket buffer passed to the driver.
 This signals that the packet has been sent out and space can be reclaimed by DLL
