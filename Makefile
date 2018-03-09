@@ -11,6 +11,7 @@ ARCH      ?= x86_64
 QDISC     ?= 0
 NETPOLL   ?= 1
 BUILD_SKB ?= 1
+STOCK     ?= oplk82573mn
 
 MODOPTS   := slave_interface=$(SLAVE_IF) use_qdisc=$(QDISC) use_netpoll=$(NETPOLL) use_build_skb=$(BUILD_SKB) $(MODOPTS)
 
@@ -21,7 +22,7 @@ $(MAKE) -C $(dir $<)
 $(MAKE) -C $(dir $<) install
 endef
 
-oplk: oplk_stack kernel_edrv demo_mn
+oplk: oplk_stack kernel_edrv demo_mn demo_cn
 
 set_freq: bin/linux/$(ARCH)/demo_mn_console/mnobd.cdc
 	@perl -e 'open FH,"+<$<"; binmode(FH); seek(FH,92,0); print FH pack("S", 1000*<>)'
@@ -30,7 +31,7 @@ get_freq: bin/linux/$(ARCH)/demo_mn_console/mnobd.cdc
 
 unload: bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplksmsc95xxmn.ko || echo Nothing to unload
-	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplk82573mn.ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload $(STOCK).ko || echo Nothing to unload
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_rawsockmn.ko || echo Nothing to unload
 
@@ -38,10 +39,15 @@ test_rpi: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/op
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplksmsc95xxmn.ko
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
 
-test_stock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplk82573mn.ko
-	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplk82573mn.ko || echo Nothing to unload
-	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload oplk82573mn.ko
+test_stock: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/$(STOCK).ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload $(STOCK).ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload $(STOCK).ko
 	cd bin/linux/$(ARCH)/demo_mn_console && sudo ./demo_mn_console
+
+test_stock_cn: bin/linux/$(ARCH)/demo_cn_console/demo_cn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/$(STOCK).ko
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload $(STOCK).ko || echo Nothing to unload
+	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkload $(STOCK).ko
+	cd bin/linux/$(ARCH)/demo_cn_console && sudo ./demo_cn_console
 
 test_bridge: bin/linux/$(ARCH)/demo_mn_console/demo_mn_console bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv/oplkgeneric_bridgemn.ko
 	cd bin/linux/$(ARCH)/oplkdrv_kernelmodule_edrv && sudo ./plkunload oplkgeneric_bridgemn.ko || echo Nothing to unload
