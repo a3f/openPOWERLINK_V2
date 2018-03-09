@@ -77,9 +77,9 @@ module_param(use_netpoll, bool, 0);
 static int use_netpoll = false;
 #endif
 
-static bool use_build_skb = true; /* FIXME if it turns out stable enough, remove option */
+static bool use_build_skb = false; /* FIXME Seems to suffer from use-after-free */
 module_param(use_build_skb, bool, 0);
-MODULE_PARM_DESC(use_build_skb, "Use build_skb? 0 = no, 1 = yes (default)");
+MODULE_PARM_DESC(use_build_skb, "Use build_skb? 0 = no (default), 1 = yes");
 
 
 //------------------------------------------------------------------------------
