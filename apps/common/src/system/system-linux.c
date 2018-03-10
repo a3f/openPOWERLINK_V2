@@ -48,6 +48,9 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <pthread.h>
 #include <signal.h>
 #include <sys/time.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <linux/types.h>
 #include <trace/trace.h>
 #include "system.h"
 
@@ -59,6 +62,8 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // const defines
 //------------------------------------------------------------------------------
 #define SET_CPU_AFFINITY
+#define AVOID_HIGH_CSTATE
+#define AVOID_SWAPPING
 #define MAIN_THREAD_PRIORITY        20
 
 //------------------------------------------------------------------------------
@@ -172,6 +177,28 @@ int system_init(void)
         CPU_ZERO(&affinity);
         CPU_SET(1, &affinity);
         sched_setaffinity(0, sizeof(cpu_set_t), &affinity);
+    }
+#endif
+
+#if defined(AVOID_HIGH_CSTATE) /* Less jitter at cost of power consumption */
+    {
+        int fd = open("/dev/cpu_dma_latency", O_RDWR);
+        if (fd >= 0) {
+            __s32 target = 0;
+            int ret = write(fd, &target, sizeof target);
+            if (ret <= 0) {
+                TRACE("%s() couldn't set cpu_dma_latency to %d! %s\n",
+                        __func__, target, strerror(errno));
+                close(fd);
+            }
+        }
+    }
+#endif
+
+#if defined(AVOID_SWAPPING)
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) <= 0) {
+        TRACE("%s() couldn't mlockall our memory! %s\n",
+                __func__, strerror(errno));
     }
 #endif
 
