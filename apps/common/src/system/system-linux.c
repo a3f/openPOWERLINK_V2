@@ -196,7 +196,7 @@ int system_init(void)
 #endif
 
 #if defined(AVOID_SWAPPING)
-    if (mlockall(MCL_CURRENT | MCL_FUTURE) <= 0) {
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) < 0) {
         TRACE("%s() couldn't mlockall our memory! %s\n",
                 __func__, strerror(errno));
     }
