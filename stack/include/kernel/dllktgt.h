@@ -50,17 +50,66 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Linux kernel requires the critical section within DLL
 #include <linux/spinlock.h>
 
+typedef struct {
+    spinlock_t lock;
+    int pid;
+    atomic_t count;
+} tRecursiveLock;
+
+static inline void dll_recursiveSpinLock_irqsave(tRecursiveLock *lock, ULONG tgtDllkFlags)
+{
+    if (lock->pid == current->pid) {
+        atomic_inc(&lock->count);
+        tgtDllkFlags = 0;
+    } else {
+        spin_lock_irqsave(&lock->lock, tgtDllkFlags);
+        atomic_inc(&lock->count);
+        lock->pid = current->pid;
+    }
+}
+static inline void dll_recursiveSpinUnlock_irqrestore(tRecursiveLock *lock, ULONG tgtDllkFlags)
+{
+    if (atomic_dec_and_test(&lock->count)) {
+        lock->pid = NULL;
+        spin_unlock_irqrestore(&lock->lock, tgtDllkFlags);
+    }
+}
+
+// edrv-bridge_linux might call into DLL for Tx confirmation while holding the lock,
+// so we use a recursive lock instead.
+static inline void dll_recursiveSpinLockInit(tRecursiveLock *lock) {
+        spin_lock_init(&lock->lock);
+        lock->pid = -1;
+        atomic_set(&lock->count, 0);
+}
+
+#ifdef DLL_USE_RECURSIVE_LOCK
+
+#define TGT_DLLK_DEFINE_CRITICAL_SECTION    tRecursiveLock tgtDllkCriticalSection_l;
+#define TGT_DLLK_DECLARE_CRITICAL_SECTION   extern tRecursiveLock tgtDllkCriticalSection_l;
+#define TGT_DLLK_INITIALIZE_CRITICAL_SECTION()  dll_recursiveSpinLockInit(&tgtDllkCriticalSection_l);
+#define TGT_DLLK_DECLARE_FLAGS              ULONG tgtDllkFlags;
+#define TGT_DLLK_ENTER_CRITICAL_SECTION()   dll_recursiveSpinLock_irqsave(&tgtDllkCriticalSection_l, tgtDllkFlags);
+#define TGT_DLLK_LEAVE_CRITICAL_SECTION()   dll_recursiveSpinUnlock_irqrestore(&tgtDllkCriticalSection_l, tgtDllkFlags);
+
+#else /* DLL_USE_RECURSIVE_LOCK */
+
 #define TGT_DLLK_DEFINE_CRITICAL_SECTION    DEFINE_SPINLOCK(tgtDllkCriticalSection_l);
 #define TGT_DLLK_DECLARE_CRITICAL_SECTION   extern spinlock_t tgtDllkCriticalSection_l;
+#define TGT_DLLK_INITIALIZE_CRITICAL_SECTION()
 #define TGT_DLLK_DECLARE_FLAGS              ULONG tgtDllkFlags;
 #define TGT_DLLK_ENTER_CRITICAL_SECTION()   spin_lock_irqsave(&tgtDllkCriticalSection_l, tgtDllkFlags);
 #define TGT_DLLK_LEAVE_CRITICAL_SECTION()   spin_unlock_irqrestore(&tgtDllkCriticalSection_l, tgtDllkFlags);
+
+#endif /* DLL_USE_RECURSIVE_LOCK */
+
 
 #else   /* ((TARGET_SYSTEM == _LINUX_) && defined(__KERNEL__)) */
 
 // all other targets do not need the critical section within DLL
 #define TGT_DLLK_DEFINE_CRITICAL_SECTION
 #define TGT_DLLK_DECLARE_CRITICAL_SECTION
+#define TGT_DLLK_INITIALIZE_CRITICAL_SECTION()
 #define TGT_DLLK_DECLARE_FLAGS
 #define TGT_DLLK_ENTER_CRITICAL_SECTION()
 #define TGT_DLLK_LEAVE_CRITICAL_SECTION()

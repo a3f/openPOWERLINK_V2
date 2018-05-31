@@ -136,6 +136,8 @@ tOplkError dllk_init(void)
     // Reset the instance
     OPLK_MEMSET(&dllkInstance_g, 0, sizeof(dllkInstance_g));
 
+    TGT_DLLK_INITIALIZE_CRITICAL_SECTION()
+
 #if (CONFIG_DLL_PROCESS_SYNC == DLL_PROCESS_SYNC_ON_TIMER)
     if ((ret = synctimer_registerHandler(cbCnTimerSync)) != kErrorOk)
         return ret;
