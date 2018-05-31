@@ -48,6 +48,7 @@ usage()
 # set defaults
 #
 module=
+keep_loaded_driver=false
 
 ###############################################################################
 # Read command line arguments
@@ -55,6 +56,7 @@ module=
 while [ $# -gt 0 ]
 do
     case "$1" in
+        -k)     keep_loaded_driver=true;; # as is
         --)     shift; break;;
         -h)     usage ;;
         -*|*)   module=$1; shift; break ;;
@@ -76,11 +78,19 @@ moduleId=`basename $module .ko`
 # strip off last two characters (mn/cn)
 moduleId=${moduleId:0:${#moduleId}-2}
 
+if [[ "$moduleId" =~ "generic" ]]; then
+    keep_loaded_driver=true
+fi
+
 ###############################################################################
 #
 # Check if suitable ethernet card is available
 # If we find more than one ethernet card we provide a prompt to select one.
 #
+if $keep_loaded_driver; then
+    exit 0
+fi
+
 let i=0
 while read line; do
     device=`echo $line | cut -f1 -d","`
